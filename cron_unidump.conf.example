@@ -1,0 +1,39 @@
+#--------------------------------------------------------#
+# Default Settings (Example Configuration)
+#--------------------------------------------------------#
+# IMPORTANT: Copy this file to cron_unidump.conf and fill in your actual values
+# DO NOT commit cron_unidump.conf with real credentials to version control
+#
+# Files
+# ----------
+BACKUP_USERGROUP='nginx:nginx'
+BACKUP_FILEOWN='your_user:your_group'
+
+# MySQL Connection
+# ----------
+# For security, consider using one of these methods instead of storing password here:
+# 1. Create ~/.my.cnf with credentials (recommended)
+# 2. Use mysql_config_editor to store credentials
+# 3. Use environment variables
+#
+BACKUP_HOST="localhost"
+BACKUP_USER="root"
+BACKUP_PASS="YOUR_PASSWORD_HERE"  # ⚠️ Replace with actual password or use secure method
+
+# Alternatively, use MySQL config file (recommended):
+# BACKUP_MYSQL_DEFAULTS_FILE="$HOME/.mysql_backup.cnf"
+
+# Mail Settings
+# ----------
+# Set to 'y' if you'd like to be emailed the backup (requires mutt)
+BACKUP_MAIL=n
+# Email addresses to send backups to, separated by a space
+BACKUP_EMAILS="your-email@example.com"
+BACKUP_SUBJECT="MySQL backup on \$SERVER (\$DATE)"
+
+# Retention Policy
+# ----------
+# Delete old files?
+BACKUP_DELETE=y
+# How many days of backups do you want to keep?
+BACKUP_INTERVAL_DAYS=30

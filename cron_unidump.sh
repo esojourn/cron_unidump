@@ -25,7 +25,19 @@ function die(){
 }
 #
 function mysqlCommand(){
-  echo `mysql -h $1 --user=$2 --password=$3 -Bse "$4"`;
+  local host=$1
+  local user=$2
+  local pass=$3
+  local command=$4
+  local mysql_opts=""
+
+  # If using MySQL defaults file (more secure)
+  if [[ -n "$MYSQL_DEFAULTS_FILE" && -f "$MYSQL_DEFAULTS_FILE" ]]; then
+    echo $(mysql --defaults-file="$MYSQL_DEFAULTS_FILE" -h "$host" -Bse "$command");
+  else
+    # Fallback to password parameter (less secure)
+    echo $(mysql -h "$host" --user="$user" --password="$pass" -Bse "$command");
+  fi
 }
 function getColorByType(){
   case $1 in
@@ -78,13 +90,41 @@ function noticeMsg(){
 function successMsg(){
   commonMsg "$1" "$2" 'success'
 }
+
+# Unified logging function
+function logMsg(){
+  local level=$1
+  local message=$2
+  local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
+
+  # Log to file if LOG_FILE is set
+  if [[ -n "$LOG_FILE" ]]; then
+    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+  fi
+
+  # Also display based on level
+  case $level in
+    'ERROR')
+      alertMsg "$message"
+      ;;
+    'WARN')
+      noticeMsg "$message"
+      ;;
+    'INFO')
+      commentLine 'notice' "$message"
+      ;;
+  esac
+}
 # check of the directory exists
 # if not, create it
 function createDirectory(){
-  if [ ! -d $1 ]; then
-    mkdir -p $1
-    if [ -d $1 ]; then
+  if [ ! -d "$1" ]; then
+    mkdir -p "$1"
+    if [ -d "$1" ]; then
       successMsg "Successfully create the directory: $1"
+    else
+      alertMsg "Failed to create directory: $1"
+      exit 1
     fi
   fi
 }
@@ -93,11 +133,11 @@ function createDirectory(){
 # $3 $logBaseDir
 function necessaryDirectory(){
 
-  createDirectory $1
-  createDirectory $2
-  createDirectory $3
+  createDirectory "$1"
+  createDirectory "$2"
+  createDirectory "$3"
 
-  if [ ! -d $1 ] || [ ! -d $2 ] || [ ! -d $3 ]; then
+  if [ ! -d "$1" ] || [ ! -d "$2" ] || [ ! -d "$3" ]; then
     alertMsg "Miss required directory" "Miss required directory, Please manually create"
   fi
 }
@@ -109,6 +149,36 @@ function unidump_initEnv(){
   configDir="$HOME/.cron_unidump.d"
   fileOwn=${fileOwn:-${BACKUP_FILEOWN}}
 }
+
+# Validate configuration
+function unidump_validate_config(){
+  local errors=0
+
+  # Check required tools
+  if [[ -z "$myDumper" ]] && [[ -z "$mysqlDump" ]] && [[ -z "$myHotcopy" ]]; then
+    alertMsg "No backup tools found" "Please install mydumper, mysqldump, or mysqlhotcopy"
+    ((errors++))
+  fi
+
+  # Check if MySQL is accessible
+  if [[ -n "$MYSQL_DEFAULTS_FILE" && -f "$MYSQL_DEFAULTS_FILE" ]]; then
+    if ! mysql --defaults-file="$MYSQL_DEFAULTS_FILE" -e "SELECT 1;" > /dev/null 2>&1; then
+      alertMsg "MySQL connection failed" "Please check your credentials in $MYSQL_DEFAULTS_FILE"
+      ((errors++))
+    fi
+  elif [[ -n "$BACKUP_PASS" && "$BACKUP_PASS" != "YOUR_PASSWORD_HERE" ]]; then
+    if ! mysql -h "$BACKUP_HOST" -u "$BACKUP_USER" -p"$BACKUP_PASS" -e "SELECT 1;" > /dev/null 2>&1; then
+      alertMsg "MySQL connection failed" "Please check your credentials in config file"
+      ((errors++))
+    fi
+  fi
+
+  if [[ $errors -gt 0 ]]; then
+    exit 1
+  fi
+
+  successMsg "Configuration validation passed"
+}
 # ------------------
 # Check mysql config
 # ------------------
@@ -117,6 +187,7 @@ function unidump_backup_db_check(){
   DBHOST=${DBHOST:-${BACKUP_HOST}}
   DBUSER=${DBUSER:-${BACKUP_USER}}
   DBPASS=${DBPASS:-${BACKUP_PASS}}
+  MYSQL_DEFAULTS_FILE=${MYSQL_DEFAULTS_FILE:-${BACKUP_MYSQL_DEFAULTS_FILE}}
   DBENGINE=${DBENGINE:-"myisam"}
   DBNAME=${DBNAME//,/ }
   DBMAIL=${DBMAIL:-${BACKUP_MAIL}}
@@ -126,17 +197,24 @@ function unidump_backup_db_check(){
 
   CHECK_RESULT=true
 
+  # Check if MySQL credentials are configured
+  if [[ -z "$MYSQL_DEFAULTS_FILE" ]] && [[ -z "$DBPASS" || "$DBPASS" == "YOUR_PASSWORD_HERE" ]]; then
+    alertMsg "MySQL credentials not configured" "Please set BACKUP_PASS in config or create MySQL defaults file"
+    CHECK_RESULT=false
+    exit 1
+  fi
+
   # 没有设置DBNAME
   if [ -z "$DBNAME" ]; then
-    DBS=`mysqlCommand $DBHOST $DBUSER $DBPASS "Show databases;"`
+    DBS=$(mysqlCommand "$DBHOST" "$DBUSER" "$DBPASS" "Show databases;")
     TITLE="Creating list of all your databases... \n\n"
     BODY="Please modify config file, Usage "$DBS
-    alertMsg $TITLE $BODY
+    alertMsg "$TITLE" "$BODY"
     CHECK_RESULT=false
   fi
 
   # Fetch all tables from databases
-  DB_TABLE_NAMES=`mysqlCommand $DBHOST $DBUSER $DBPASS "use $DBNAME; show tables;"`
+  DB_TABLE_NAMES=$(mysqlCommand "$DBHOST" "$DBUSER" "$DBPASS" "use $DBNAME; show tables;")
 
   # If DB_TABLE_NAMES is empty, DBNAME no exists
   if [ -z "$DB_TABLE_NAMES" ]; then
@@ -152,9 +230,9 @@ function unidump_backup_db_check(){
     #myc="use ${DBNAME}; SHOW TABLE STATUS FROM ${DBNAME} WHERE name='$tbl';"
     myCommand="use information_schema;"
     myCommand=$myCommand"select engine from information_schema.tables where table_schema='$DBNAME' AND table_name='$tbl';"
-    tblENGINE=`mysqlCommand $DBHOST $DBUSER $DBPASS "$myCommand"`
+    tblENGINE=$(mysqlCommand "$DBHOST" "$DBUSER" "$DBPASS" "$myCommand")
 
-    tblENGINE_UPPERCASE=$(echo $tblENGINE | tr '[a-z]' '[A-Z]');
+    tblENGINE_UPPERCASE=$(echo "$tblENGINE" | tr '[a-z]' '[A-Z]');
 
     if [[ "$tblENGINE_UPPERCASE" != "$DBENGINE_UPPERCASE" ]]; then
       CHECKTYPE=false
@@ -162,7 +240,7 @@ function unidump_backup_db_check(){
     fi
   done
 
-  if [ ! $CHECKTYPE ]; then
+  if [ "$CHECKTYPE" = false ]; then
     TITLE="table engine have differences on database "$DBNAME
     BODY="You can change the table engine to "$DBENGINE_UPPERCASE
     alertMsg $TITLE $BODY
@@ -186,23 +264,37 @@ function unidump_backup_db(){
     mkdir -p $dbBackDir_date
   fi
 
-  test $DBHOST == "localhost" && server=`hostname -f` || server=$DBHOST
+  test "$DBHOST" == "localhost" && server=$(hostname -f) || server=$DBHOST
+
+  # Build MySQL connection options
+  if [[ -n "$MYSQL_DEFAULTS_FILE" && -f "$MYSQL_DEFAULTS_FILE" ]]; then
+    MYSQL_OPTS="--defaults-file=$MYSQL_DEFAULTS_FILE"
+  else
+    MYSQL_OPTS="-u $DBUSER --password=$DBPASS"
+  fi
 
   case $DBENGINE in
     "myisam")
       # mysqlhotcopy
+      if [[ -n "$MYSQL_DEFAULTS_FILE" ]]; then
+        alertMsg "mysqlhotcopy doesn't support --defaults-file" "Please use password in config or switch to mydumper"
+        exit 1
+      fi
       dumpCommand="sudo $myHotcopy -u $DBUSER -p $DBPASS --addtodest $DBNAME$DBOPTIONS $dbBackDir_date";;
     "mysqldump")
       # mysqldump
-      dumpCommand="$mysqlDump -h $DBHOST --user=$DBUSER --password=$DBPASS --add-drop-table $DBOPTIONS $DBNAME $DBSQLDUMP_TABLES -r$dbBackDir_date/backup.sql";;
+      dumpCommand="$mysqlDump -h $DBHOST $MYSQL_OPTS --add-drop-table $DBOPTIONS $DBNAME $DBSQLDUMP_TABLES -r$dbBackDir_date/backup.sql";;
     *)
       # mydumper
-      dumpCommand="$myDumper -o $dbBackDir_date -r 10000 -c -e -u $DBUSER --password=$DBPASS -B $DBNAME $DBOPTIONS";;
+      dumpCommand="$myDumper -o $dbBackDir_date -r 10000 -c -e $MYSQL_OPTS -B $DBNAME $DBOPTIONS";;
 
   esac
 
   commentLine 'notice' "Command: $dumpCommand"
-  $dumpCommand
+  if ! $dumpCommand; then
+    alertMsg "Database backup failed" "Command: $dumpCommand"
+    exit 1
+  fi
   commentLine 'notice' "Command: End"
   # Clear DBNAME backspace
   DBNAME=${DBNAME// /_}
@@ -214,7 +306,21 @@ function unidump_backup_db(){
   # Mail 发送
   # 是否存在有效备份
   if [ -r $dbBackDir_date ] && [ ! -z "$(ls $dbBackDir_date)" ]; then
-    tar -czPf $BAK_FILEPATH $dbBackDir_date
+    # Create tar archive
+    if ! tar -czPf $BAK_FILEPATH $dbBackDir_date; then
+      alertMsg "Failed to create tar archive" "$BAK_FILEPATH"
+      exit 1
+    fi
+
+    # Verify tar archive
+    if ! tar -tzf $BAK_FILEPATH > /dev/null 2>&1; then
+      alertMsg "Backup verification failed" "$BAK_FILEPATH is corrupted"
+      rm -f $BAK_FILEPATH
+      exit 1
+    fi
+
+    successMsg "Backup verified successfully" "$BAK_FILEPATH"
+
     #解压时 tar -zvjPf .tar.bz2
     sudo rm -rf $dbBackDir_date
 
@@ -274,11 +380,13 @@ function unidump_backup_file(){
 
     fullBackup=true
     if [[ -f $intervalSnapFile ]]; then
-      lastBackupTime=$(stat $intervalSnapFile | grep Modify | awk '{print $2}' )
-      t1=$(date -d "$lastBackupTime" +%s)
-      t2=$(date -d "$INTERVAL_DAYS days ago" +%s)
-      if [[ $t1 -ge $t2 ]]; then
-        fullBackup=false
+      lastBackupTime=$(stat $intervalSnapFile | grep Modify | awk '{print $2}' 2>/dev/null)
+      if [[ -n "$lastBackupTime" ]]; then
+        t1=$(date -d "$lastBackupTime" +%s 2>/dev/null)
+        t2=$(date -d "$INTERVAL_DAYS days ago" +%s 2>/dev/null)
+        if [[ -n "$t1" ]] && [[ -n "$t2" ]] && [[ $t1 -ge $t2 ]]; then
+          fullBackup=false
+        fi
       fi
     fi
 
@@ -335,7 +443,7 @@ function unidump_readConfig(){
   dbBaseDir=${dbDir:-$DEFAULT_dbBaseDir}/$NAME
   logBaseDir=${logDir:-$DEFAULT_logBaseDir}/$NAME
 
-  necessaryDirectory $fileBaseDir $dbBaseDir $logBaseDir
+  necessaryDirectory "$fileBaseDir" "$dbBaseDir" "$logBaseDir"
 }
 
 #
@@ -563,8 +671,9 @@ $(($i+1)) )$file"
     ;;
 
   'check')
-    #@TODO check config file
-    commentLine "alert" "The command support is upcoming!"
+    #check config file
+    unidump_validate_config
+    successMsg "Configuration check completed"
 
     ;;
   'help')

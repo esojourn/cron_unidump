@@ -1,0 +1,16 @@
+# MySQL Backup Configuration File
+# Place this file at ~/.mysql_backup.cnf
+# Set permissions: chmod 600 ~/.mysql_backup.cnf
+
+[client]
+user=root
+password=YOUR_MYSQL_PASSWORD_HERE
+host=localhost
+
+[mysqldump]
+single-transaction
+quick
+lock-tables=false
+
+[mydumper]
+# mydumper specific options can go here

@@ -1,2 +1,25 @@
+# Configuration files with sensitive data
 conf/*.conf
 mysql-backup.conf
+*.conf.backup
+
+# User configuration directory
+.cron_unidump.d/
+.cron_unidump.conf
+
+# MySQL credentials
+.my.cnf
+.mysql_backup.cnf
+
+# Backup files
+backup/
+*.tar.gz
+*.tar.bz2
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*~
