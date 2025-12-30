@@ -1,5 +1,10 @@
 ####File
 SOURCE='/var/www/html/example'
+
+# 排除示例：缓存、临时文件、日志
+EXCLUDE=("cache" "tmp" "logs/*.log")
+
+EXTRA_SOURCE=""
 ####Mysql
 DBHOST='localhost'
 #DBUSER=''

@@ -1,2 +1,4 @@
 conf/*.conf
 mysql-backup.conf
+.spec-workflow
+.bmad-core
