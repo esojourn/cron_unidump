@@ -432,9 +432,11 @@ mysqlDump=$(which mysqldump)
 # Basic backup file store directory
 ########################################
 # file
-DEFAULT_fileBaseDir=/var/www/html/backup
+#DEFAULT_fileBaseDir=/var/www/html/backup
+DEFAULT_fileBaseDir=/mnt/datadisk/www/backup
 # database
-DEFAULT_dbBaseDir=/var/www/html/backup
+#DEFAULT_dbBaseDir=/var/www/html/backup
+DEFAULT_dbBaseDir=/mnt/datadisk/www/backup
 # log
 DEFAULT_logBaseDir=/var/log/backup
 
