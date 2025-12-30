@@ -1,5 +1,26 @@
 #------Files------#
 #FILE
+SOURCE='/var/www'
+
+# 排除路径配置（使用数组语法支持多个路径）
+# 示例1 - 单个绝对路径：
+# EXCLUDE=("/var/www/cache")
+#
+# 示例2 - 多个路径（绝对路径）：
+# EXCLUDE=("/var/www/cache" "/var/www/tmp" "/var/www/logs")
+#
+# 示例3 - 相对路径（相对于SOURCE）：
+# EXCLUDE=("cache" "tmp" "logs")
+#
+# 示例4 - 混合使用绝对路径、相对路径和通配符：
+# EXCLUDE=("/var/www/cache" "tmp" "*.log")
+#
+# 示例5 - 不排除任何路径（默认）：
+EXCLUDE=()
+
+# 额外备份目录（可选）
+EXTRA_SOURCE=""
+
 #------Database------#
 DBHOST='localhost'
 #DBUSER=''

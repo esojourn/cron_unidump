@@ -260,7 +260,26 @@ function unidump_backup_file(){
     logFileName=$NAME-$dateStrSuffix.log
     logFile=$logBaseDir/$logFileName
 
-    fileBackupCommand="tar -g $snapFile -jpPc -f $TARGET $SOURCE ${EXCLUDE[@]}"
+    # 构建排除参数
+    excludeArgs=""
+    if [[ -n "${EXCLUDE[@]}" ]]; then
+      for path in "${EXCLUDE[@]}"; do
+        # 处理相对路径：如果不是以 / 开头，则相对于 SOURCE
+        if [[ ! "$path" =~ ^/ && ! "$path" =~ ^\* ]]; then
+          path="$SOURCE/$path"
+        fi
+
+        # 验证路径（警告但不中断）
+        if [[ ! -e "$path" && ! "$path" =~ \* ]]; then
+          commentLine 'alert' "Warning: Exclude path not found: $path"
+        fi
+
+        excludeArgs="$excludeArgs --exclude='$path'"
+        commentLine 'notice' "Excluding: $path"
+      done
+    fi
+
+    fileBackupCommand="tar -g $snapFile -jpPc -f $TARGET $excludeArgs $SOURCE"
     if [[ -d $EXTRA_SOURCE ]]; then
       fileBackupCommand="$fileBackupCommand $EXTRA_SOURCE"
     fi
@@ -315,7 +334,7 @@ function unidump_backup_file(){
     commentLine 'notice' "------------------ File backup complete"
   fi
   # unset variables
-  unset NAME SOURCE TARGET EXCLUDE
+  unset NAME SOURCE TARGET EXCLUDE excludeArgs
 }
 
 function unidump_readConfig(){
