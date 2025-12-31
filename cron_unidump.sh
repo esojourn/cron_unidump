@@ -346,7 +346,7 @@ function unidump_readConfig(){
     exit 1
   fi
 
-  INFO=`cat $confFile | grep -v ^$ | sed -n "s/\s\+//;/^#/d;p" ` && eval "$INFO"
+  INFO=`cat $confFile | grep -v ^$ | sed -n "s/^\s\+//;/^#/d;p" ` && eval "$INFO"
   NAME=${confFile#*/.cron_unidump.d/}
   NAME=${NAME%%.conf}
 
