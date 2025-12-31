@@ -12,6 +12,8 @@
 - [高级功能](#高级功能)
 - [排除路径详解](#排除路径详解)
 - [故障排除](#故障排除)
+- [已知限制](#已知限制)
+- [配置文件参考](#配置文件参考)
 
 ## 🎯 功能特性
 
@@ -169,9 +171,13 @@ cron_unidump edit myapp
 
 # 创建新配置
 cron_unidump add myapp
+```
 
-# 删除配置
-cron_unidump remove myapp
+### 清理旧备份
+
+```bash
+# 删除 60 天前的备份文件
+cron_unidump clear_db myapp 60
 ```
 
 ### 备份操作
@@ -186,9 +192,14 @@ cron_unidump backup file myapp
 # 备份所有
 cron_unidump backup all myapp
 
-# 恢复备份
-cron_unidump restore myapp 2024-12-30
+# 恢复备份（⚠️ 开发中）
+# cron_unidump restore myapp 2024-12-30
 ```
+
+⚠️ **当前限制**：
+- ✅ 支持列出备份文件并选择
+- 🚧 数据库恢复功能开发中
+- ❌ 文件恢复暂不支持
 
 ### 系统管理
 
@@ -199,25 +210,108 @@ cron_unidump restore myapp 2024-12-30
 # 卸载 cron_unidump
 ./cron_unidump.sh uninstall
 
-# 显示帮助
-./cron_unidump.sh -h
+# 显示帮助（⏳ 即将支持）
+./cron_unidump.sh help
+
+# 检查配置（⏳ 即将支持）
+./cron_unidump.sh check
 ```
 
 ## 🎁 高级功能
 
 ### 自动调度
 
-在 crontab 中添加计划任务：
+在 crontab 中添加计划任务。使用 `crontab -e` 编辑：
 
+**基础示例**：
 ```bash
-# 每天凌晨2点备份
+# 每天凌晨2点完整备份
 0 2 * * * cron_unidump backup all myapp
 
-# 每周一备份
+# 每周一凌晨2点备份数据库
 0 2 * * 1 cron_unidump backup db myapp
 
-# 每月1号备份
+# 每月1号凌晨2点备份所有
 0 2 1 * * cron_unidump backup all myapp
+```
+
+**生产环境最佳实践**：
+
+```bash
+# 1. 日志记录（推荐）
+0 2 * * * /usr/bin/cron_unidump backup all myapp >> /var/log/cron_backup.log 2>&1
+
+# 2. 失败时发送邮件告警
+0 2 * * * /usr/bin/cron_unidump backup all myapp || mail -s "⚠️ 备份失败" admin@example.com
+
+# 3. 定期清理旧备份（每月1号凌晨4点）
+0 4 1 * * /usr/bin/cron_unidump clear_db myapp 60
+
+# 4. 多站点错开时间（避免 I/O 竞争）
+0 2 * * * /usr/bin/cron_unidump backup all site1 >> /var/log/backup_site1.log 2>&1
+30 2 * * * /usr/bin/cron_unidump backup all site2 >> /var/log/backup_site2.log 2>&1
+0 3 * * * /usr/bin/cron_unidump backup all site3 >> /var/log/backup_site3.log 2>&1
+```
+
+**日志轮转配置** (`/etc/logrotate.d/cron_unidump`）：
+
+```bash
+/var/log/cron_backup.log
+/var/log/backup_site*.log
+{
+    weekly          # 每周轮转一次
+    rotate 4        # 保留 4 个历史文件
+    compress        # 压缩旧日志
+    delaycompress   # 延迟压缩
+    missingok       # 文件不存在不报错
+    notifempty      # 空文件不轮转
+    create 0640 root root
+}
+```
+
+**日志位置**：
+- 备份日志：`~/.cron_unidump/logs/{name}/`
+- Cron 日志：`/var/log/cron_backup.log`（自定义）
+
+### 邮件通知（需手动启用）
+
+⚠️ **当前状态**：功能已实现但默认禁用（代码被注释）
+
+**启用步骤**：
+
+1. 安装邮件工具：
+   ```bash
+   sudo apt-get install mutt
+   ```
+
+2. 配置 mutt SMTP 设置（自行参考 mutt 文档）
+
+3. 取消 `cron_unidump.sh` 中第 229-234 行的注释：
+   ```bash
+   # 找到这段代码并取消注释
+   # echo -e "$BODY" | mutt -s "$SUBJECT" $ATTACH -- $DBMAILTO
+   ```
+
+4. 在配置文件中启用邮件通知：
+   ```bash
+   BACKUP_MAIL=y
+   BACKUP_EMAILS="admin@example.com"
+   BACKUP_SUBJECT="MySQL 备份 - $SERVER ($DATE)"
+   ```
+
+**功能说明**：
+- ✅ **数据库备份邮件** - 包含备份文件 MD5 校验和
+- ❌ **文件备份邮件** - 暂不支持（仅数据库备份支持）
+
+**配置示例**：
+```bash
+# 全局配置：~/.cron_unidump.conf
+BACKUP_MAIL=y
+BACKUP_EMAILS="admin@example.com backup@example.com"
+
+# 单个备份配置：~/.cron_unidump.d/myapp.conf
+DBMAIL=y                          # 覆盖全局设置
+DBMAILTO="ops@example.com"        # 覆盖收件人
 ```
 
 ### 多数据库引擎支持
@@ -233,18 +327,62 @@ DBENGINE='innodb'
 DBENGINE='mysqldump'
 ```
 
+**数据库引擎选择指南**：
+
+| 引擎 | 备份工具 | 适用场景 | 速度 | 特点 |
+|------|---------|---------|------|------|
+| `myisam` | mysqlhotcopy | 纯 MyISAM 表 | ⚡⚡⚡ 最快 | 物理复制，需锁表 |
+| `innodb` | mydumper | InnoDB 表（推荐） | ⚡⚡ 快 | 并行备份，保证一致性 |
+| `mysqldump` | mysqldump | 混合引擎 | ⚡ 较慢 | 兼容性最好 |
+
+**选择建议**：
+- **现代 Web 应用** → `innodb`（Laravel、WordPress 5.5+、Drupal 9+）
+- **大型数据库** → `innodb`（支持并行备份）
+- **混合引擎** → `mysqldump`
+- **遗留系统** → `myisam`
+
 ### 增量备份
 
-文件备份自动支持增量备份：
+文件备份自动支持增量备份机制。
+
+**工作原理**：
+
+- 使用 GNU tar 的 `-g` 快照功能追踪文件系统状态
+- 记录文件的 inode、修改时间等元数据
+- 仅备份变化的文件，大幅减少备份大小和时间
+
+**两级快照策略**：
+
+```
+Day 1:  完整备份 → 创建基准快照
+Day 2-29: 增量备份 → 基于基准快照
+Day 30: 完整备份 → 更新基准快照
+```
+
+快照文件位置（自动管理）：
+- `snapshot-{name}-incremental` - 当前增量快照
+- `snapshot-{name}-intervalBase` - 周期基准快照
+
+**配置完整备份间隔**：
 
 ```bash
-# 配置完整备份间隔（天）
-INTERVAL_DAYS=30
+INTERVAL_DAYS=30  # 每30天进行一次完整备份
+```
 
-# 默认行为
-# - 每30天进行一次完整备份
-# - 其他时间进行增量备份
-# - 使用 tar 快照文件追踪变更
+⚠️ **恢复说明**：
+
+恢复增量备份需要：
+1. 对应的完整备份文件
+2. 所有后续增量备份（按时间顺序）
+3. 在目标目录执行逐一恢复
+
+```bash
+# 恢复完整备份
+tar -xjf FILE-myapp-2024-12-01.tar.bz2 -C /restore/path
+
+# 恢复增量备份（按时间顺序）
+tar -xjf FILE-myapp-2024-12-10.tar.bz2 -C /restore/path
+tar -xjf FILE-myapp-2024-12-20.tar.bz2 -C /restore/path
 ```
 
 ## 🚫 排除路径详解
@@ -451,6 +589,33 @@ du -sh ~/.cron_unidump/*
 find ~/.cron_unidump/files -name "*.tar.bz2" -mtime +30 -delete
 ```
 
+## ⚠️ 已知限制
+
+### 功能限制
+
+- ❌ **文件恢复** - 暂未实现，仅支持数据库恢复
+- 🚧 **数据库恢复** - 选择备份文件功能完整，但实际恢复逻辑开发中
+- 🚧 **邮件通知** - 代码已实现但默认禁用，需手动启用（见高级功能章节）
+- ❌ **文件备份邮件** - 仅数据库备份支持邮件通知
+- ❌ **远程备份存储** - 不支持 S3、FTP、阿里云 OSS 等远程存储
+
+### 即将支持的命令
+
+- `check` - 配置文件检查和验证
+- `help` - 命令帮助信息
+- `remove` - 删除备份配置（当前未实现）
+
+### 开发计划
+
+- [ ] 完善数据库恢复功能（自动化还原 SQL）
+- [ ] 实现文件系统恢复功能
+- [ ] 启用邮件通知功能（取消代码注释）
+- [ ] 添加备份验证机制（MD5/SHA256 校验）
+- [ ] 支持备份加密（AES-256）
+- [ ] 实现配置检查命令（validate 配置）
+- [ ] 添加远程备份支持（S3、FTP、SFTP）
+- [ ] 创建 Web 管理界面
+
 ## 📝 配置文件参考
 
 ### 环境变量
@@ -482,19 +647,52 @@ find ~/.cron_unidump/files -name "*.tar.bz2" -mtime +30 -delete
 | `DBENGINE` | 备份引擎 | `innodb` |
 | `DBOPTIONS` | 额外选项 | `--lock-tables=false` |
 
+**多数据库备份**：
+
+支持备份多个数据库，使用逗号或空格分隔：
+
+```bash
+# 方式1：逗号分隔（推荐）
+DBNAME='db1,db2,db3'
+
+# 方式2：空格分隔
+DBNAME='db1 db2 db3'
+
+# 实际例子
+DBNAME='wordpress,nextcloud,mediawiki'
+```
+
+⚠️ **注意事项**：
+- `mysqldump` 引擎完全支持多库备份
+- `mydumper` 和 `mysqlhotcopy` 可能不支持多库，建议使用 `mysqldump`
+- 多库备份会生成单个备份文件，包含所有数据库
+
 ## 📄 许可证
 
-此项目遵循相关许可证。
+此项目遵循相关许可证。详见 LICENSE 文件。
+
+## 👤 作者
+
+**Ryanlau** (showq@qq.com)
+
+**版本历史**：
+- **v1.0** (2014/10/23) - 初始版本，基础备份功能
+- **v2.0** (2014/11/10) - 增强配置管理，支持多引擎
+- **v2.1** (2024年更新) - 添加多排除路径支持，完善文档
 
 ## 🤝 贡献
 
-欢迎提交问题和拉取请求！
+欢迎提交 Issue 和 Pull Request！
+
+如有任何建议或发现 Bug，请提交到项目仓库。
 
 ## 📞 支持
 
-如有问题，请查看 CLAUDE.md 文件了解项目架构和实现细节。
+- **架构文档** - 详见 `CLAUDE.md` 文件了解项目架构和实现细节
+- **配置示例** - 查看 `conf/` 目录获取更多配置模板
+- **问题反馈** - 提交 GitHub Issue（如果有仓库）或联系作者
 
 ---
 
-**最后更新**: 2024年12月30日
-**版本**: 2.0.0（支持多个排除路径）
+**最后更新**: 2024年12月31日
+**版本**: 2.1（支持多个排除路径、邮件通知、完善文档）
