@@ -261,7 +261,7 @@ function unidump_backup_file(){
     logFile=$logBaseDir/$logFileName
 
     # 构建排除参数
-    excludeArgs=""
+    excludeArgs=()
     if [[ -n "${EXCLUDE[@]}" ]]; then
       for path in "${EXCLUDE[@]}"; do
         # 处理相对路径：如果不是以 / 开头，则相对于 SOURCE
@@ -274,12 +274,12 @@ function unidump_backup_file(){
           commentLine 'alert' "Warning: Exclude path not found: $path"
         fi
 
-        excludeArgs="$excludeArgs --exclude='$path'"
+        excludeArgs+=("--exclude=$path")
         commentLine 'notice' "Excluding: $path"
       done
     fi
 
-    fileBackupCommand="tar -g $snapFile -jpPc -f $TARGET $excludeArgs $SOURCE"
+    fileBackupCommand="tar -g $snapFile -jpPc -f $TARGET ${excludeArgs[@]} $SOURCE"
     if [[ -d $EXTRA_SOURCE ]]; then
       fileBackupCommand="$fileBackupCommand $EXTRA_SOURCE"
     fi
