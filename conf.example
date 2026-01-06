@@ -18,8 +18,15 @@ SOURCE='/var/www'
 # 示例5 - 不排除任何路径（默认）：
 EXCLUDE=()
 
-# 额外备份目录（可选）
-EXTRA_SOURCE=""
+# 额外备份源目录配置（使用数组语法支持多个路径）
+# 示例1 - 单个额外源目录：
+# EXTRA_SOURCE=("/var/www/uploads")
+#
+# 示例2 - 多个额外源目录：
+# EXTRA_SOURCE=("/var/www/uploads" "/var/www/assets" "/var/www/media")
+#
+# 示例3 - 不添加额外源目录（默认）：
+EXTRA_SOURCE=()
 
 #------Database------#
 DBHOST='localhost'

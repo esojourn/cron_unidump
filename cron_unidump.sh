@@ -280,8 +280,19 @@ function unidump_backup_file(){
     fi
 
     fileBackupCommand="tar -g $snapFile -jpPc -f $TARGET ${excludeArgs[@]} $SOURCE"
-    if [[ -d $EXTRA_SOURCE ]]; then
-      fileBackupCommand="$fileBackupCommand $EXTRA_SOURCE"
+    # 处理额外备份源目录（兼容旧格式字符串和新格式数组）
+    if [[ -n "${EXTRA_SOURCE[@]}" ]]; then
+      for extra_path in "${EXTRA_SOURCE[@]}"; do
+        # 跳过空字符串（兼容旧配置 EXTRA_SOURCE=""）
+        [[ -z "$extra_path" ]] && continue
+        # 验证路径是否存在
+        if [[ -d "$extra_path" ]]; then
+          fileBackupCommand="$fileBackupCommand $extra_path"
+          commentLine 'notice' "Extra source: $extra_path"
+        else
+          commentLine 'alert' "Warning: Extra source path not found or not a directory: $extra_path"
+        fi
+      done
     fi
 
     snapDate=$(date +"%y%m%d")
@@ -334,7 +345,7 @@ function unidump_backup_file(){
     commentLine 'notice' "------------------ File backup complete"
   fi
   # unset variables
-  unset NAME SOURCE TARGET EXCLUDE excludeArgs
+  unset NAME SOURCE TARGET EXCLUDE excludeArgs EXTRA_SOURCE
 }
 
 function unidump_readConfig(){

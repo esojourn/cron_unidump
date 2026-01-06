@@ -1,6 +1,6 @@
 #------Files------#
 #FILE
-#SOURCE='/var/www'
+SOURCE='/var/www'
 
 # 排除路径配置（使用数组语法支持多个路径）
 # 示例1 - 单个绝对路径：
@@ -23,11 +23,11 @@ EXCLUDE=()
 EXTRA_SOURCE=""
 
 #------Database------#
-#DBHOST='localhost'
+DBHOST='localhost'
 #DBUSER=''
 #DBPASS=''
-#DBENGINE='innodb'
-#DBNAME='database'
+DBENGINE='innodb'
+DBNAME='database'
 #DBMAIL=''
 #DBMAILTO=''
 #DBOPTIONS=''
