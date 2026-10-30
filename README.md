@@ -130,7 +130,10 @@ BACKUP_SUBJECT='Backup Report'
 
 # 保留策略
 BACKUP_DELETE='y'
-BACKUP_INTERVAL_DAYS=30
+
+# 文件备份：完整备份间隔（天）与模式
+BACKUP_INTERVAL_DAYS=14
+BACKUP_FILE_MODE=incremental    # incremental | differential
 ```
 
 ### 单个备份配置
@@ -341,49 +344,70 @@ DBENGINE='mysqldump'
 - **混合引擎** → `mysqldump`
 - **遗留系统** → `myisam`
 
-### 增量备份
+### 增量 / 差异备份
 
-文件备份自动支持增量备份机制。
+文件备份基于 GNU tar 的 `-g` 快照（listed-incremental），支持两种模式：
 
-**工作原理**：
+| 模式 | `FILE_MODE` | 每次备份包含 | 恢复需要 |
+|------|-------------|--------------|----------|
+| 增量（默认） | `incremental` | 自上一次备份以来的变化 | 最近的 full + 之后所有 inc |
+| 差异 | `differential` | 自最近一次完整备份以来的全部变化 | 最近的 full + 最近一个 diff |
 
-- 使用 GNU tar 的 `-g` 快照功能追踪文件系统状态
-- 记录文件的 inode、修改时间等元数据
-- 仅备份变化的文件，大幅减少备份大小和时间
-
-**两级快照策略**：
+每 `INTERVAL_DAYS` 天自动做一次完整备份；基准快照或上一次的快照丢失时也会自动转为完整备份。
 
 ```
-Day 1:  完整备份 → 创建基准快照
-Day 2-29: 增量备份 → 基于基准快照
-Day 30: 完整备份 → 更新基准快照
+Day 1:      full  → 创建基准快照
+Day 2-14:   inc   → 只包含前一天之后的变化
+Day 15:     full  → 更新基准快照，开始新的链
 ```
 
-快照文件位置（自动管理）：
-- `snapshot-{name}-incremental` - 当前增量快照
-- `snapshot-{name}-intervalBase` - 周期基准快照
-
-**配置完整备份间隔**：
+**配置**：
 
 ```bash
-INTERVAL_DAYS=30  # 每30天进行一次完整备份
+# 全局：~/.cron_unidump.conf
+BACKUP_INTERVAL_DAYS=14         # 每 14 天一次完整备份
+BACKUP_FILE_MODE=incremental    # incremental | differential
+
+# 单个配置：~/.cron_unidump.d/{name}.conf（覆盖全局）
+INTERVAL_DAYS=7
+FILE_MODE=differential
 ```
+
+**备份文件命名**：文件名末尾带类型，便于识别恢复链：
+
+```
+FILE-myapp-2024-12-01-19-51-01-full.tar.bz2
+FILE-myapp-2024-12-02-19-51-01-inc.tar.bz2
+FILE-myapp-2024-12-03-19-51-01-inc.tar.bz2
+```
+
+**可靠性**：
+
+- tar 返回码 1（备份过程中有文件被修改）视为成功，归档可用
+- tar 失败时快照自动回滚到运行前的状态，下次运行不会漏掉这些变化
+- 每次运行前的快照保存为 `snapshot-{name}-incremental-YYMMDD.log`
+- tar 以 `nice` / `ionice` 低优先级运行，减少对线上服务的影响
+
+快照文件位置（自动管理，位于 `logDir/{name}/`）：
+- `snapshot-{name}-incremental` - 当前快照（增量链的状态）
+- `snapshot-{name}-incremental-intervalBase` - 最近一次完整备份的基准快照
+
+⚠️ **注意：tar 以 ctime 判断变化**
+
+`chown -R` / `chmod -R` 等只改属性的操作也会更新 ctime，下一次备份会把这些文件全部重新打包。增量模式下只影响一次；差异模式下会持续到下一次完整备份。
 
 ⚠️ **恢复说明**：
 
-恢复增量备份需要：
-1. 对应的完整备份文件
-2. 所有后续增量备份（按时间顺序）
-3. 在目标目录执行逐一恢复
+按时间顺序先解开最近的 `*-full`，再依次解开之后的每个 `*-inc`（差异模式只需最近一个 `*-diff`）。使用 `-g /dev/null` 让 tar 同步删除在备份之间被删除的文件：
 
 ```bash
-# 恢复完整备份
-tar -xjf FILE-myapp-2024-12-01.tar.bz2 -C /restore/path
-
-# 恢复增量备份（按时间顺序）
-tar -xjf FILE-myapp-2024-12-10.tar.bz2 -C /restore/path
-tar -xjf FILE-myapp-2024-12-20.tar.bz2 -C /restore/path
+cd /restore/path
+tar -xjf FILE-myapp-2024-12-01-19-51-01-full.tar.bz2 -g /dev/null
+tar -xjf FILE-myapp-2024-12-02-19-51-01-inc.tar.bz2  -g /dev/null
+tar -xjf FILE-myapp-2024-12-03-19-51-01-inc.tar.bz2  -g /dev/null
 ```
+
+清理旧备份时，不要删除仍在使用中的 `*-full`，否则其后的 `*-inc` 无法恢复。
 
 ## 🚫 排除路径详解
 
@@ -534,9 +558,8 @@ tar -tjf ~/.cron_unidump/files/FILE-myapp-*.tar.bz2 | grep cache
 ~/.cron_unidump/
 ├── files/                    # 文件备份
 │   ├── myapp/
-│   │   ├── FILE-myapp-20241230.tar.bz2
-│   │   ├── .snapshot-myapp-incremental
-│   │   └── .snapshot-myapp-intervalBase
+│   │   ├── FILE-myapp-2024-12-30-19-51-01-full.tar.bz2
+│   │   └── FILE-myapp-2024-12-31-19-51-01-inc.tar.bz2
 │   └── otherapp/
 ├── dbs/                      # 数据库备份
 │   ├── myapp/
@@ -545,8 +568,10 @@ tar -tjf ~/.cron_unidump/files/FILE-myapp-*.tar.bz2 | grep cache
 │   └── otherapp/
 └── logs/                     # 备份日志
     ├── myapp/
-    │   ├── myapp-20241230.log
-    │   └── snapshot-myapp-incremental
+    │   ├── myapp-2024-12-30-19-51-01.log
+    │   ├── snapshot-myapp-incremental
+    │   ├── snapshot-myapp-incremental-intervalBase
+    │   └── snapshot-myapp-incremental-241230.log
     └── otherapp/
 ```
 
@@ -625,7 +650,8 @@ find ~/.cron_unidump/files -name "*.tar.bz2" -mtime +30 -delete
 | `fileDir` | 文件备份目录 | `$HOME/.cron_unidump/files` |
 | `dbDir` | 数据库备份目录 | `$HOME/.cron_unidump/dbs` |
 | `logDir` | 日志目录 | `$HOME/.cron_unidump/logs` |
-| `BACKUP_INTERVAL_DAYS` | 保留天数 | `30` |
+| `BACKUP_INTERVAL_DAYS` | 文件完整备份间隔（天） | `30` |
+| `BACKUP_FILE_MODE` | 文件备份模式：`incremental` / `differential` | `incremental` |
 
 ### 文件备份配置
 
@@ -634,7 +660,8 @@ find ~/.cron_unidump/files -name "*.tar.bz2" -mtime +30 -delete
 | `SOURCE` | 备份源目录 | `/var/www` |
 | `EXCLUDE` | 排除路径（数组） | `("cache" "logs")` |
 | `EXTRA_SOURCE` | 额外备份目录 | `/var/html` |
-| `INTERVAL_DAYS` | 完整备份间隔 | `30` |
+| `INTERVAL_DAYS` | 完整备份间隔（天），覆盖全局 | `14` |
+| `FILE_MODE` | 备份模式，覆盖全局 | `incremental` |
 
 ### 数据库备份配置
 
@@ -679,6 +706,7 @@ DBNAME='wordpress,nextcloud,mediawiki'
 - **v1.0** (2014/10/23) - 初始版本，基础备份功能
 - **v2.0** (2014/11/10) - 增强配置管理，支持多引擎
 - **v2.1** (2024年更新) - 添加多排除路径支持，完善文档
+- **v2.2** (2026年10月) - 真正的增量备份（链式快照）、可选差异模式、备份类型文件名后缀、失败时快照回滚、低优先级运行
 
 ## 🤝 贡献
 
@@ -694,5 +722,5 @@ DBNAME='wordpress,nextcloud,mediawiki'
 
 ---
 
-**最后更新**: 2024年12月31日
-**版本**: 2.1（支持多个排除路径、邮件通知、完善文档）
+**最后更新**: 2026年10月30日
+**版本**: 2.2（增量 / 差异备份模式、失败回滚）
