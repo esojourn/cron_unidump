@@ -635,6 +635,14 @@ case $1 in
     exit $?
 
     ;;
+  'mirror')
+    # Mirror large directories (MIRROR_SOURCES) to the NAS without archiving them
+    mirrorScript=${MIRROR_SCRIPT:-$selfDir/scripts/rsyncMirror.sh}
+    commentLine 'notice' "Mirror: $mirrorScript (log: ${MIRROR_LOG:-/var/log/backup/rsyncMirror.log})"
+    bash "$mirrorScript"
+    exit $?
+
+    ;;
   'run')
     # cron entry point: back up every given job (type:name), then push once.
     # Example: cron_unidump run file:site1 all:site2
@@ -702,6 +710,7 @@ cron_unidump - MySQL + file backups with tar snapshots, pushed to a NAS
   cron_unidump backup file|db|all <name>  run one job now (exit code != 0 on failure)
   cron_unidump push                       push finished archives to the NAS (PUSH_* settings)
   cron_unidump run <type:name> [...]      back up each job, then push once (use this in cron)
+  cron_unidump mirror                     mirror MIRROR_SOURCES to the NAS as plain files (no archive)
   cron_unidump help                       this text
 
 Global config: ~/.cron_unidump.conf   Job configs: ~/.cron_unidump.d/<name>.conf

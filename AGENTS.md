@@ -8,6 +8,7 @@ Guide for coding agents working on this repository. User-facing behaviour is doc
 |---|---|
 | `cron_unidump.sh` | the whole CLI: config loading, DB backup, file backup, command dispatch (`case $1`) |
 | `scripts/rsyncPush.sh` | push to the NAS; called by `cron_unidump push` and `run` |
+| `scripts/rsyncMirror.sh` | plain-file mirror of `MIRROR_SOURCES` to the NAS; called by `cron_unidump mirror`. Never deletes on the server; deletions on the NAS go to `<MIRROR_DEST>-deleted/<date>/` via `--backup-dir` |
 | `cron_unidump.conf` | template for `~/.cron_unidump.conf` (copied by `install`) |
 | `example.eg` | template for `~/.cron_unidump.d/<name>.conf` (copied by `install`, used by `add`) |
 

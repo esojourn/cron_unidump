@@ -24,11 +24,12 @@ cron 03:50 ─► cron_unidump run db:site file:site
 5. [定时任务](#定时任务)
 6. [文件备份原理](#文件备份原理)
 7. [推送到 NAS](#推送到-nas)
-8. [恢复](#恢复)
-9. [文件与日志位置](#文件与日志位置)
-10. [配置项参考](#配置项参考)
-11. [故障排查](#故障排查)
-12. [已知限制](#已知限制)
+8. [大目录镜像（mirror）](#大目录镜像mirror)
+9. [恢复](#恢复)
+10. [文件与日志位置](#文件与日志位置)
+11. [配置项参考](#配置项参考)
+12. [故障排查](#故障排查)
+13. [已知限制](#已知限制)
 
 ## 环境要求
 
@@ -120,6 +121,7 @@ cron_unidump push && tail /var/log/backup/rsyncPush.log
 | `cron_unidump backup file\|db\|all <name>` | 立即执行一个任务 |
 | `cron_unidump push` | 把已完成的备份包推送到 NAS |
 | `cron_unidump run <类型:名称> [...]` | 按顺序备份每个任务，最后推送一次 |
+| `cron_unidump mirror` | 把 `MIRROR_SOURCES` 里的大目录按原样同步到 NAS（见[大目录镜像](#大目录镜像mirror)） |
 | `cron_unidump help` | 简要用法 |
 
 退出码：成功为 `0`；任一备份或推送失败为非 0。`run` 中某个任务失败后会继续执行后面的任务，并推送已经完成的备份包。
@@ -195,6 +197,38 @@ cron_unidump push && tail /var/log/backup/rsyncPush.log
 
 推送到 NAS 的文件全部保留，本工具不会删除 NAS 上的任何文件，需要自己定期清理。清理时不要删掉后续 `-inc` 仍然依赖的 `-full`。
 
+## 大目录镜像（mirror）
+
+音频、视频、电子书这类目录体积大、很少修改，而且本身已压缩，每次打 tar 包既占本地空间又推不动。`cron_unidump mirror`（`scripts/rsyncMirror.sh`）把它们按原样同步到 NAS：
+
+- 不在本地生成备份包，不占服务器磁盘。
+- 第一次传完整目录，以后只传新增和修改的文件；中断后下次续传。
+- 服务器上删除或被替换的文件，在 NAS 上移到 `<MIRROR_DEST>-deleted/<日期>/` 保留，不会丢失。本工具不清理这个目录。
+- 不修改、不删除服务器上的任何文件。
+- 使用与推送相同的 NAS 连接配置（`PUSH_HOST` 等），有单独的锁，首次长时间同步不会重复启动。
+
+配置（`~/.cron_unidump.conf`）：
+
+```bash
+MIRROR_SOURCES=("/var/www/site/files/audio" "/var/www/site/files/video")
+```
+
+同时在对应的文件任务里用 `EXCLUDE` 排除这些目录，避免重复备份。
+
+```cron
+# 每周三、周日 22:30
+30 22 * * 0,3  /usr/bin/cron_unidump mirror >> /var/log/backup/cron_unidump.log 2>&1
+```
+
+NAS 上的结果（保留服务器上的完整路径）：
+
+```
+<PUSH_PATH>/<PUSH_SERVER>/mirror/var/www/site/files/audio/...           当前副本
+<PUSH_PATH>/<PUSH_SERVER>/mirror-deleted/2026-01-07/var/www/site/...    当天被删除或替换的旧文件
+```
+
+恢复：直接把 `mirror/` 下的目录拷回服务器，例如 `rsync -a NAS:.../mirror/var/www/site/files/audio/ /var/www/site/files/audio/`。
+
 ## 恢复
 
 ### 文件
@@ -235,6 +269,7 @@ mysql -u root -p site_db < ./var/www/html/backup/site/<时间>/backup.sql
 | `/var/log/backup/<任务>/snapshot-<任务>-incremental-intervalBase` | 最近一次全量的快照 |
 | `/var/log/backup/<任务>/snapshot-<任务>-incremental-YYMMDD.log` | 每次备份前的快照（历史记录与回滚用） |
 | `/var/log/backup/rsyncPush.log` | 推送日志 |
+| `/var/log/backup/rsyncMirror.log` | 镜像日志 |
 | `/var/log/backup/cron_unidump.log` | cron 输出（按上面的写法重定向时） |
 
 备份包命名（时间为 UTC）：`FILE-<任务>-<时间>-<full|inc|diff>.tar.bz2`、`DB-<库名>-<时间>.tar.gz`。
@@ -269,6 +304,11 @@ mysql -u root -p site_db < ./var/www/html/backup/site/<时间>/backup.sql
 | `PUSH_LOCK` | `/var/lock/rsyncPush.lock` | 锁文件 |
 | `PUSH_WAIT_MAX` | `21600` | 等待正在运行的备份的最长秒数 |
 | `PUSH_BWLIMIT` | 空 | rsync 限速（KiB/s），空表示不限 |
+| `MIRROR_SOURCES` | 空 | `mirror` 要同步的目录（bash 数组，绝对路径） |
+| `MIRROR_DEST` | `mirror` | NAS 上 `<PUSH_PATH>/<PUSH_SERVER>/` 下的镜像目录名 |
+| `MIRROR_LOG` | `/var/log/backup/rsyncMirror.log` | 镜像日志 |
+| `MIRROR_LOCK` | `/var/lock/rsyncMirror.lock` | 镜像锁文件 |
+| `MIRROR_BWLIMIT` | 空 | 镜像限速（KiB/s），空表示不限 |
 
 ### 任务：文件
 
