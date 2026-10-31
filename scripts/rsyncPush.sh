@@ -16,12 +16,14 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 # ---------- defaults ----------
+# PUSH_HOST, PUSH_USER, PUSH_PATH and PUSH_SERVER have no defaults on purpose:
+# set them in ~/.cron_unidump.conf.
 PUSH_SRC='/var/www/html/backup'
-PUSH_SERVER=''                          # NAS sub directory, e.g. 001-SK2024 (required)
-PUSH_HOST='dingxuan.synology.me'
-PUSH_USER='unicom'
-PUSH_PORT='11756'
-PUSH_PATH='/var/services/homes/unicom/rsync'
+PUSH_SERVER=''                          # NAS sub directory for this server, e.g. 001-web1 (required)
+PUSH_HOST=''                            # NAS host name or IP (required)
+PUSH_USER=''                            # SSH user on the NAS (required)
+PUSH_PORT='22'
+PUSH_PATH=''                            # base directory on the NAS (required)
 PUSH_SSH_KEY="$HOME/.ssh/id_rsa"
 PUSH_KNOWN_HOSTS="$HOME/.ssh/known_hosts_nas"
 PUSH_LOG='/var/log/backup/rsyncPush.log'
@@ -45,8 +47,12 @@ else
 fi
 log() { printf '[%s] %s\n' "$(date '+%F %T %z')" "$*"; }
 
-if [ -z "$PUSH_SERVER" ]; then
-  log "PUSH_SERVER is not set in $GLOBAL_CONF"
+missing=''
+for v in PUSH_SERVER PUSH_HOST PUSH_USER PUSH_PATH; do
+  [ -z "${!v}" ] && missing="$missing $v"
+done
+if [ -n "$missing" ]; then
+  log "not configured:$missing (set them in $GLOBAL_CONF)"
   exit 2
 fi
 

@@ -524,12 +524,10 @@ mysqlDump=$(which mysqldump)
 ########################################
 # Basic backup file store directory
 ########################################
-# file
-#DEFAULT_fileBaseDir=/var/www/html/backup
-DEFAULT_fileBaseDir=/mnt/datadisk/www/backup
-# database
-#DEFAULT_dbBaseDir=/var/www/html/backup
-DEFAULT_dbBaseDir=/mnt/datadisk/www/backup
+# file (override with fileDir= in ~/.cron_unidump.conf)
+DEFAULT_fileBaseDir=/var/www/html/backup
+# database (override with dbDir=)
+DEFAULT_dbBaseDir=/var/www/html/backup
 # log
 DEFAULT_logBaseDir=/var/log/backup
 
@@ -551,9 +549,12 @@ dateStrSuffix=${dateStr//\:/-}
 # ./cron_unidump.sh edit $name
 # ./cron_unidump.sh show $name
 
-if [[ $1 != "install" ]]; then
-  unidump_initEnv
-fi
+# install and help work without a global config
+case "$1" in
+  install|help|-h|--help|'') ;;
+  *) unidump_initEnv ;;
+esac
+[[ -z "$1" ]] && set -- help
 
 confFile="$HOME/.cron_unidump.d/$2.conf"
 
@@ -564,18 +565,18 @@ case $1 in
       alertMsg "It is installed" "Has been installed, please do not repeat installation"
       exit 1
     fi
-    # Copy global config, set custom directory
-    cp $initDir/cron_unidump.conf $glob_conf
+    # Copy global config and the job template (configs may hold passwords: owner-only)
+    cp $selfDir/cron_unidump.conf $glob_conf
+    chmod 600 $glob_conf
     createDirectory $HOME/.cron_unidump.d
-    cp $initDir/example.eg $HOME/.cron_unidump.d/example.eg
+    chmod 700 $HOME/.cron_unidump.d
+    cp $selfDir/example.eg $HOME/.cron_unidump.d/example.eg
 
-    sudo chmod +x $initDir/cron_unidump.sh
+    chmod +x $selfDir/cron_unidump.sh $selfDir/scripts/rsyncPush.sh
 
-    # @TODO: Add to /usr/bin
-    # ln -s $initDir/
-    ln -s $initDir/cron_unidump.sh /usr/bin/cron_unidump
+    ln -sfn $selfDir/cron_unidump.sh /usr/bin/cron_unidump
 
-    successMsg 'Success' 'Successfully installed'
+    successMsg 'Success' "Installed. Next: edit $glob_conf, then cron_unidump add <name>"
 
     ;;
   'uninstall')
@@ -603,7 +604,8 @@ case $1 in
     # Add new conf
     unidump_is_exists_file $confFile
     cp $HOME/.cron_unidump.d/example.eg $confFile
-    vim $confFile
+    chmod 600 $confFile
+    ${EDITOR:-vim} $confFile
 
     successMsg 'Success' 'Successfully created $2, You must check the file and change it to real variables'
 
@@ -611,13 +613,13 @@ case $1 in
   'edit')
     unidump_non_exists_file $confFile
     # commentLine 'success' "You edit config file that you use the code editor "
-    vim "$configDir/$2.conf"
+    ${EDITOR:-vim} "$configDir/$2.conf"
 
     ;;
   'show')
     unidump_non_exists_file $confFile
-    commentLine 'success' "The following content is the config file [${confFile}] info"
-    cat $confFile
+    commentLine 'success' "The following content is the config file [${confFile}] info (passwords masked)"
+    sed -E 's/^([[:space:]]*[A-Z_]*PASS[A-Z_]*=).*/\1****/' $confFile
 
     ;;
 
@@ -689,12 +691,27 @@ $(($i+1)) )$file"
     commentLine "alert" "The command support is upcoming!"
 
     ;;
-  'help')
-    commentLine "alert" "The command support is upcoming!"
+  'help'|'-h'|'--help')
+    cat <<'USAGE'
+cron_unidump - MySQL + file backups with tar snapshots, pushed to a NAS
+
+  cron_unidump install                    copy config templates, link /usr/bin/cron_unidump
+  cron_unidump add <name>                 create ~/.cron_unidump.d/<name>.conf and edit it
+  cron_unidump edit <name> | show <name>  edit / print a job config (show masks passwords)
+  cron_unidump list                       list job names
+  cron_unidump backup file|db|all <name>  run one job now (exit code != 0 on failure)
+  cron_unidump push                       push finished archives to the NAS (PUSH_* settings)
+  cron_unidump run <type:name> [...]      back up each job, then push once (use this in cron)
+  cron_unidump help                       this text
+
+Global config: ~/.cron_unidump.conf   Job configs: ~/.cron_unidump.d/<name>.conf
+Logs: /var/log/backup/<name>/ and /var/log/backup/rsyncPush.log
+USAGE
 
     ;;
   *)
-    commentLine "alert" "Only support: install, uninstall, add, backup, push, run, restore, list, edit, show, check"
+    commentLine "alert" "Unknown command. Run: cron_unidump help"
+    exit 1
     ;;
 esac
 

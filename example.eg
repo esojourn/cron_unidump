@@ -1,34 +1,29 @@
-#------Files------#
-#FILE
-SOURCE='/var/www'
+#--------------------------------------------------------#
+# cron_unidump job config -> ~/.cron_unidump.d/<name>.conf
+# <name> = letters, digits, _ or - only. It becomes the sub directory
+# for this job's archives and logs.
+# Keep private if it contains a password: chmod 600
+#--------------------------------------------------------#
 
-# 排除路径配置（使用数组语法支持多个路径）
-# 示例1 - 单个绝对路径：
-# EXCLUDE=("/var/www/cache")
-#
-# 示例2 - 多个路径（绝对路径）：
-# EXCLUDE=("/var/www/cache" "/var/www/tmp" "/var/www/logs")
-#
-# 示例3 - 相对路径（相对于SOURCE）：
-# EXCLUDE=("cache" "tmp" "logs")
-#
-# 示例4 - 混合使用绝对路径、相对路径和通配符：
-# EXCLUDE=("/var/www/cache" "tmp" "*.log")
-#
-# 示例5 - 不排除任何路径（默认）：
-#EXCLUDE=()
+#------ Files (cron_unidump backup file <name>) ------#
+SOURCE='/var/www/example'
 
+# Paths to skip. Relative paths are relative to SOURCE; globs are allowed.
+# Entries already written as tar options (--exclude=/path) also work.
 EXCLUDE=()
-# 额外备份目录（可选）
-EXTRA_SOURCE=""
+# EXCLUDE=("cache" "tmp" "*.log" "/var/www/example/private/big")
 
-#------Database------#
+# Extra directories to include in the same archive (optional)
+EXTRA_SOURCE=()
+
+# Override the global full-backup interval / mode for this job (optional)
+#INTERVAL_DAYS=14
+#FILE_MODE=incremental        # incremental | differential
+
+#------ Database (cron_unidump backup db <name>) ------#
 DBHOST='localhost'
-#DBUSER=''
-#DBPASS=''
-DBENGINE='innodb'
-DBNAME='database'
-#DBMAIL=''
-#DBMAILTO=''
-#DBOPTIONS=''
-
+DBNAME='example_db'           # several: 'db1,db2' (mysqldump only)
+#DBUSER=''                    # empty = BACKUP_USER from the global config
+#DBPASS=''                    # empty = BACKUP_PASS from the global config
+DBENGINE='mysqldump'          # mysqldump | innodb (mydumper) | myisam (mysqlhotcopy)
+DBOPTIONS='--single-transaction --routines --triggers'

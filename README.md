@@ -1,779 +1,322 @@
-# cron_unidump - 自动化备份管理工具
+# cron_unidump
 
-一个为 Linux 系统管理员设计的 Bash 备份工具，提供统一的接口来自动化备份、管理和恢复 MySQL 数据库和文件系统。
+Linux Web 服务器的定时备份工具（Bash）。每天备份网站文件和 MySQL/MariaDB 数据库，然后通过 SSH 把备份包推送到 NAS，推送成功后删除本地副本。
 
-## 📋 目录
+- 文件备份基于 GNU tar 快照：每 N 天一次全量，期间只打包变化的文件。
+- 数据库备份用 `mysqldump`（也支持 `mydumper` / `mysqlhotcopy`）。
+- 每台服务器只需一条 cron：依次备份所有任务，全部完成后推送一次。
+- 推送不会发送正在写入的备份包。
 
-- [功能特性](#功能特性)
-- [安装](#安装)
-- [快速开始](#快速开始)
-- [配置指南](#配置指南)
-- [常用命令](#常用命令)
-- [高级功能](#高级功能)
-- [排除路径详解](#排除路径详解)
-- [故障排除](#故障排除)
-- [已知限制](#已知限制)
-- [配置文件参考](#配置文件参考)
-
-## 🎯 功能特性
-
-### 核心功能
-- **MySQL 数据库备份** - 支持 MyISAM、InnoDB 等多种引擎
-- **文件系统备份** - 支持增量备份和完整备份
-- **灵活配置** - 基于配置文件的备份配置管理
-- **自动调度** - 与 cron 集成的自动备份任务
-- **邮件通知** - 备份完成后的邮件通知（可选）
-
-### 新增功能 ✨
-- **多个排除路径支持** - 在文件备份时排除多个目录和文件模式
-- **相对路径处理** - 支持相对于备份源的相对路径
-- **通配符支持** - 支持 glob 模式进行灵活排除
-- **路径验证** - 对不存在的排除路径显示警告
-
-## 📦 安装
-
-### 前置要求
-
-```bash
-# 必需工具
-- Bash 4.0+
-- mysql / mysqldump / mysqlhotcopy / mydumper
-- tar（支持快照功能）
-- find, md5sum, date, hostname, sudo
-
-# 可选工具
-- mutt（邮件通知）
+```
+cron 03:50 ─► cron_unidump run db:site file:site
+                 ├─ backup db site   ─► /var/www/html/backup/site/DB-<库名>-<时间>.tar.gz
+                 ├─ backup file site ─► /var/www/html/backup/site/FILE-site-<时间>-full|inc.tar.bz2
+                 └─ push             ─► rsync ─► NAS:<PUSH_PATH>/<PUSH_SERVER>/backup/site/
+                                                 （确认传输成功后才删除本地文件）
 ```
 
-### 安装步骤
+## 目录
+
+1. [环境要求](#环境要求)
+2. [安装](#安装)
+3. [配置](#配置)
+4. [命令](#命令)
+5. [定时任务](#定时任务)
+6. [文件备份原理](#文件备份原理)
+7. [推送到 NAS](#推送到-nas)
+8. [恢复](#恢复)
+9. [文件与日志位置](#文件与日志位置)
+10. [配置项参考](#配置项参考)
+11. [故障排查](#故障排查)
+12. [已知限制](#已知限制)
+
+## 环境要求
+
+| 用途 | 需要的工具 |
+|---|---|
+| 基本功能 | bash 4+、GNU tar、bzip2、gzip、coreutils、`sudo` |
+| 数据库备份 | `mysql` 客户端和 `mysqldump`（或 `mydumper` / `mysqlhotcopy`） |
+| 推送 | 两端都有 `rsync` 和 `ssh`；本机有 `flock`、`pgrep` |
+
+- Debian/Ubuntu：`apt install git bzip2 rsync mariadb-client`
+- RHEL/Rocky/Alma：`dnf install git bzip2 rsync mysql`
+
+用 root 运行（需要读取网站文件，写入 `/var/www/html/backup` 和 `/var/log/backup`）。
+
+## 安装
 
 ```bash
-# 1. 下载或克隆项目
-git clone <repository-url>
-cd cron_unidump
-
-# 2. 运行安装脚本
-./cron_unidump.sh install
-
-# 3. 初始化默认配置
-# 安装后会在 ~/.cron_unidump.d/ 创建配置目录
+git clone https://github.com/esojourn/cron_unidump.git /root/cron_unidump
+/root/cron_unidump/cron_unidump.sh install
 ```
 
-## 🚀 快速开始
+`install` 会创建：
 
-### 创建第一个备份配置
+| 路径 | 说明 |
+|---|---|
+| `~/.cron_unidump.conf` | 全局配置（权限 600），从仓库里的 `cron_unidump.conf` 复制 |
+| `~/.cron_unidump.d/` | 任务配置目录（权限 700），含模板 `example.eg` |
+| `/usr/bin/cron_unidump` | 指向脚本的软链接 |
+
+以后升级：`cd /root/cron_unidump && git pull`。配置在 `~` 下，升级不会改动。
+
+## 配置
+
+### 1. 全局配置 `~/.cron_unidump.conf`
+
+至少设置输出目录、数据库账号；如果要推送，再设置 NAS：
 
 ```bash
-# 创建新的备份配置
-./cron_unidump.sh add myapp
+fileDir=/var/www/html/backup
+dbDir=/var/www/html/backup
+BACKUP_INTERVAL_DAYS=14          # 每 14 天一次全量文件备份
+BACKUP_FILE_MODE=incremental
 
-# 编辑配置文件
-vi ~/.cron_unidump.d/myapp.conf
+BACKUP_USER="backup"             # 任务没有设置 DBUSER 时使用的 MySQL 账号
+BACKUP_PASS="..."
+
+PUSH_HOST='nas.example.com'
+PUSH_USER='backup'
+PUSH_PORT='22'
+PUSH_PATH='/volume1/backup'
+PUSH_SERVER='001-web1'           # 每台服务器在 NAS 上一个目录
 ```
 
-### 配置示例
+### 2. 每个站点一个任务 `~/.cron_unidump.d/<name>.conf`
 
 ```bash
-# 文件备份配置
-SOURCE='/var/www/myapp'
+cron_unidump add site            # 从 example.eg 复制出 site.conf 并用 $EDITOR 打开
+```
 
-# 排除路径（新增功能）
-EXCLUDE=("cache" "tmp" "logs/*.log" "/var/cache/myapp")
+```bash
+SOURCE='/var/www/site'
+EXCLUDE=("cache" "tmp" "*.log")  # 相对 SOURCE 的路径；也可以写绝对路径、通配符
 
-EXTRA_SOURCE=""
-
-# 数据库备份配置
 DBHOST='localhost'
-DBUSER='backup_user'
-DBPASS='password'
-DBNAME='myapp_db'
-DBENGINE='innodb'
+DBNAME='site_db'
+DBENGINE='mysqldump'
+DBOPTIONS='--single-transaction --routines --triggers'
 ```
 
-### 执行备份
+`<name>` 只用字母、数字、`_`、`-`。它会作为该任务备份包和日志的子目录名。
+
+### 3. 手动跑一次验证
 
 ```bash
-# 备份数据库
-./cron_unidump.sh backup db myapp
-
-# 备份文件
-./cron_unidump.sh backup file myapp
-
-# 备份所有（数据库+文件）
-./cron_unidump.sh backup all myapp
-```
-
-## 📖 配置指南
-
-### 全局配置
-
-全局配置文件位于 `$HOME/.cron_unidump.conf`，包含默认设置：
-
-```bash
-# 备份存储目录
-fileDir="$HOME/.cron_unidump/files"
-dbDir="$HOME/.cron_unidump/dbs"
-logDir="$HOME/.cron_unidump/logs"
-
-# 默认数据库凭证
-BACKUP_HOST='localhost'
-BACKUP_USER='root'
-BACKUP_PASS=''
-
-# 文件所有权
-BACKUP_FILEOWN='root:root'
-
-# 邮件通知
-BACKUP_MAIL='y'
-BACKUP_EMAILS='admin@example.com'
-BACKUP_SUBJECT='Backup Report'
-
-# 保留策略
-BACKUP_DELETE='y'
-
-# 文件备份：完整备份间隔（天）与模式
-BACKUP_INTERVAL_DAYS=14
-BACKUP_FILE_MODE=incremental    # incremental | differential
-```
-
-### 单个备份配置
-
-每个备份配置存储在 `~/.cron_unidump.d/{name}.conf`：
-
-```bash
-#------Files------#
-SOURCE='/var/www/myapp'
-
-# 排除路径（支持多个）
-EXCLUDE=("cache" "tmp" "logs")
-
-EXTRA_SOURCE=""
-
-#------Database------#
-DBHOST='localhost'
-DBUSER='myapp_user'
-DBPASS='password'
-DBNAME='myapp_db'
-DBENGINE='innodb'
-DBOPTIONS=''
-```
-
-## 🔧 常用命令
-
-### 配置管理
-
-```bash
-# 列出所有备份配置
-cron_unidump list
-
-# 查看配置内容
-cron_unidump show myapp
-
-# 编辑配置
-cron_unidump edit myapp
-
-# 创建新配置
-cron_unidump add myapp
-```
-
-### 清理旧备份
-
-```bash
-# 删除 60 天前的备份文件
-cron_unidump clear_db myapp 60
-```
-
-### 备份操作
-
-```bash
-# 备份数据库
-cron_unidump backup db myapp
-
-# 备份文件
-cron_unidump backup file myapp
-
-# 备份所有
-cron_unidump backup all myapp
-
-# 恢复备份（⚠️ 开发中）
-# cron_unidump restore myapp 2024-12-30
-```
-
-⚠️ **当前限制**：
-- ✅ 支持列出备份文件并选择
-- 🚧 数据库恢复功能开发中
-- ❌ 文件恢复暂不支持
-
-### 系统管理
-
-```bash
-# 安装 cron_unidump
-./cron_unidump.sh install
-
-# 卸载 cron_unidump
-./cron_unidump.sh uninstall
-
-# 显示帮助（⏳ 即将支持）
-./cron_unidump.sh help
-
-# 检查配置（⏳ 即将支持）
-./cron_unidump.sh check
-```
-
-## 🎁 高级功能
-
-### 自动调度
-
-在 crontab 中添加计划任务。使用 `crontab -e` 编辑：
-
-**基础示例**：
-```bash
-# 每天凌晨2点完整备份
-0 2 * * * cron_unidump backup all myapp
-
-# 每周一凌晨2点备份数据库
-0 2 * * 1 cron_unidump backup db myapp
-
-# 每月1号凌晨2点备份所有
-0 2 1 * * cron_unidump backup all myapp
-```
-
-**生产环境最佳实践**：
-
-```bash
-# 1. 日志记录（推荐）
-0 2 * * * /usr/bin/cron_unidump backup all myapp >> /var/log/cron_backup.log 2>&1
-
-# 2. 失败时发送邮件告警
-0 2 * * * /usr/bin/cron_unidump backup all myapp || mail -s "⚠️ 备份失败" admin@example.com
-
-# 3. 定期清理旧备份（每月1号凌晨4点）
-0 4 1 * * /usr/bin/cron_unidump clear_db myapp 60
-
-# 4. 多站点错开时间（避免 I/O 竞争）
-0 2 * * * /usr/bin/cron_unidump backup all site1 >> /var/log/backup_site1.log 2>&1
-30 2 * * * /usr/bin/cron_unidump backup all site2 >> /var/log/backup_site2.log 2>&1
-0 3 * * * /usr/bin/cron_unidump backup all site3 >> /var/log/backup_site3.log 2>&1
-```
-
-**日志轮转配置** (`/etc/logrotate.d/cron_unidump`）：
-
-```bash
-/var/log/cron_backup.log
-/var/log/backup_site*.log
-{
-    weekly          # 每周轮转一次
-    rotate 4        # 保留 4 个历史文件
-    compress        # 压缩旧日志
-    delaycompress   # 延迟压缩
-    missingok       # 文件不存在不报错
-    notifempty      # 空文件不轮转
-    create 0640 root root
-}
-```
-
-**日志位置**：
-- 备份日志：`~/.cron_unidump/logs/{name}/`
-- Cron 日志：`/var/log/cron_backup.log`（自定义）
-
-### 推送到 NAS（push / run）
-
-`scripts/rsyncPush.sh` 把备份目录里**已完成**的归档用 rsync 推送到 NAS，确认传输成功后删除本地文件。由 `cron_unidump push` 调用，配置写在全局配置 `~/.cron_unidump.conf` 的 `PUSH_*` 变量里。
-
-**推荐的 cron 写法**：一行完成"备份所有任务 → 推送一次"，推送一定发生在备份结束之后：
-
-```bash
-# 每天 03:50：先备份 site1（文件）和 site2（文件+数据库），再推送
-50 3 * * * /usr/bin/cron_unidump run file:site1 all:site2 >> /var/log/backup/cron_unidump.log 2>&1
-```
-
-`run` 的参数是 `类型:配置名`，类型同 `backup`（`file` / `db` / `all`）。每个任务在独立进程中执行，任一任务失败时返回码非 0，但仍会推送已完成的归档。
-
-**防止推送不完整的备份**：
-
-- 归档先写成 `*.part`，tar 成功后才改名；推送排除 `*.part`
-- 推送开始前若有 `cron_unidump backup` 仍在运行，会等待（最多 `PUSH_WAIT_MAX` 秒）
-- `flock` 保证同时只有一个推送
-- 对 NAS 做严格的主机密钥校验（`PUSH_KNOWN_HOSTS`）
-- rsync 失败时保留本地文件，下次继续推送
-
-**配置**（`~/.cron_unidump.conf`）：
-
-```bash
-PUSH_SERVER='001-SK2024'                      # 必填：NAS 上的子目录
-#PUSH_SRC='/var/www/html/backup'              # 要推送的本地目录（与 fileDir/dbDir 一致）
-#PUSH_HOST='dingxuan.synology.me'
-#PUSH_USER='unicom'
-#PUSH_PORT='11756'
-#PUSH_PATH='/var/services/homes/unicom/rsync'
-#PUSH_SSH_KEY="$HOME/.ssh/id_rsa"
-#PUSH_KNOWN_HOSTS="$HOME/.ssh/known_hosts_nas"
-#PUSH_LOG='/var/log/backup/rsyncPush.log'
-#PUSH_WAIT_MAX=21600                          # 等待备份结束的最长秒数
-#PUSH_BWLIMIT=''                              # 限速 KiB/s，空 = 不限
-```
-
-NAS 上的目录结构保持不变：`<PUSH_PATH>/<PUSH_SERVER>/backup/<配置名>/<归档>`。
-
-**首次部署**：
-
-```bash
-# 1. 生成密钥（已有可跳过），把公钥加入 NAS 账号的 ~/.ssh/authorized_keys
-ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''
-cat ~/.ssh/id_ed25519.pub
-# 2. 保存 NAS 主机密钥，并核对指纹
-ssh-keyscan -p 11756 dingxuan.synology.me > ~/.ssh/known_hosts_nas
-ssh-keygen -lf ~/.ssh/known_hosts_nas
-# 3. 在 ~/.cron_unidump.conf 设置 PUSH_SERVER（以及 PUSH_SSH_KEY），手动试推一次
+cron_unidump backup db site && cron_unidump backup file site
+ls -la /var/www/html/backup/site/
 cron_unidump push && tail /var/log/backup/rsyncPush.log
 ```
 
-### 邮件通知（需手动启用）
+## 命令
 
-⚠️ **当前状态**：功能已实现但默认禁用（代码被注释）
+| 命令 | 作用 |
+|---|---|
+| `cron_unidump install` | 复制配置模板，创建 `/usr/bin/cron_unidump` |
+| `cron_unidump add <name>` | 从模板新建任务配置并打开编辑 |
+| `cron_unidump edit <name>` | 用 `$EDITOR` 编辑任务配置 |
+| `cron_unidump show <name>` | 显示任务配置（密码会被隐藏） |
+| `cron_unidump list` | 列出所有任务 |
+| `cron_unidump backup file\|db\|all <name>` | 立即执行一个任务 |
+| `cron_unidump push` | 把已完成的备份包推送到 NAS |
+| `cron_unidump run <类型:名称> [...]` | 按顺序备份每个任务，最后推送一次 |
+| `cron_unidump help` | 简要用法 |
 
-**启用步骤**：
+退出码：成功为 `0`；任一备份或推送失败为非 0。`run` 中某个任务失败后会继续执行后面的任务，并推送已经完成的备份包。
 
-1. 安装邮件工具：
-   ```bash
-   sudo apt-get install mutt
-   ```
+## 定时任务
 
-2. 配置 mutt SMTP 设置（自行参考 mutt 文档）
+每台服务器写一条 `run`。这一条里的所有备份都结束后才开始推送。
 
-3. 取消 `cron_unidump.sh` 中第 229-234 行的注释：
-   ```bash
-   # 找到这段代码并取消注释
-   # echo -e "$BODY" | mutt -s "$SUBJECT" $ATTACH -- $DBMAILTO
-   ```
-
-4. 在配置文件中启用邮件通知：
-   ```bash
-   BACKUP_MAIL=y
-   BACKUP_EMAILS="admin@example.com"
-   BACKUP_SUBJECT="MySQL 备份 - $SERVER ($DATE)"
-   ```
-
-**功能说明**：
-- ✅ **数据库备份邮件** - 包含备份文件 MD5 校验和
-- ❌ **文件备份邮件** - 暂不支持（仅数据库备份支持）
-
-**配置示例**：
-```bash
-# 全局配置：~/.cron_unidump.conf
-BACKUP_MAIL=y
-BACKUP_EMAILS="admin@example.com backup@example.com"
-
-# 单个备份配置：~/.cron_unidump.d/myapp.conf
-DBMAIL=y                          # 覆盖全局设置
-DBMAILTO="ops@example.com"        # 覆盖收件人
+```cron
+# 分 时 日 月 周  命令
+50 3 * * *  /usr/bin/cron_unidump run db:site file:site file:uploads >> /var/log/backup/cron_unidump.log 2>&1
 ```
 
-### 多数据库引擎支持
+- `run` 的参数格式为 `类型:名称`，类型是 `file`、`db`、`all` 之一。
+- 不要把 `backup` 和 `push` 写成两条、靠固定时间差衔接。全量备份变慢时，推送会在备份还没写完时开始。
+- cron 按服务器本地时区执行（`timedatectl` 查看）。
 
-```bash
-# MyISAM 表
-DBENGINE='myisam'
+## 文件备份原理
 
-# InnoDB 表（推荐）
-DBENGINE='innodb'
+使用 GNU tar 的快照增量模式（`tar -g <快照文件>`）。
 
-# 通用备份
-DBENGINE='mysqldump'
-```
+| 模式（`FILE_MODE` / `BACKUP_FILE_MODE`） | 每次打包的内容 | 恢复时需要 |
+|---|---|---|
+| `incremental`（默认，增量） | 自上一次备份以来的变化 | 最近的 `-full` 加之后所有 `-inc` |
+| `differential`（差异） | 自上一次全量以来的全部变化 | 最近的 `-full` 加最新的一个 `-diff` |
 
-**数据库引擎选择指南**：
-
-| 引擎 | 备份工具 | 适用场景 | 速度 | 特点 |
-|------|---------|---------|------|------|
-| `myisam` | mysqlhotcopy | 纯 MyISAM 表 | ⚡⚡⚡ 最快 | 物理复制，需锁表 |
-| `innodb` | mydumper | InnoDB 表（推荐） | ⚡⚡ 快 | 并行备份，保证一致性 |
-| `mysqldump` | mysqldump | 混合引擎 | ⚡ 较慢 | 兼容性最好 |
-
-**选择建议**：
-- **现代 Web 应用** → `innodb`（Laravel、WordPress 5.5+、Drupal 9+）
-- **大型数据库** → `innodb`（支持并行备份）
-- **混合引擎** → `mysqldump`
-- **遗留系统** → `myisam`
-
-### 增量 / 差异备份
-
-文件备份基于 GNU tar 的 `-g` 快照（listed-incremental），支持两种模式：
-
-| 模式 | `FILE_MODE` | 每次备份包含 | 恢复需要 |
-|------|-------------|--------------|----------|
-| 增量（默认） | `incremental` | 自上一次备份以来的变化 | 最近的 full + 之后所有 inc |
-| 差异 | `differential` | 自最近一次完整备份以来的全部变化 | 最近的 full + 最近一个 diff |
-
-每 `INTERVAL_DAYS` 天自动做一次完整备份；基准快照或上一次的快照丢失时也会自动转为完整备份。
+以下情况做全量：基准快照超过 `INTERVAL_DAYS`（任务级）/ `BACKUP_INTERVAL_DAYS`（全局）天；或增量链需要的快照文件不存在。
 
 ```
-Day 1:      full  → 创建基准快照
-Day 2-14:   inc   → 只包含前一天之后的变化
-Day 15:     full  → 更新基准快照，开始新的链
+第 1 天      FILE-site-...-full.tar.bz2    全部文件
+第 2–14 天   FILE-site-...-inc.tar.bz2     只有前一天以来变化的文件
+第 15 天     FILE-site-...-full.tar.bz2    开始新的一条链
 ```
 
-**配置**：
+注意：
+
+- **tar 按 ctime 判断变化，不只看 mtime。** 对源目录执行 `chown -R`、`chmod -R` 后，下一次会把所有文件重新打包。增量模式下只多一次大包；差异模式下直到下次全量前每次都是大包。
+- tar 返回 `1`（读取时有文件被修改）视为成功，备份包可用。
+- tar 失败时快照会回滚，下次不会漏掉这些变化。
+- 备份包先写成 `*.part`，完成后才改名。
+- tar 以 `nice` / `ionice` 低优先级运行，减少对线上网站的影响。
+
+## 推送到 NAS
+
+`cron_unidump push` 调用 `scripts/rsyncPush.sh`，读取 `~/.cron_unidump.conf` 中的 `PUSH_*` 配置。
+
+执行顺序：
+
+1. 加锁（`flock`）。已有推送在运行时直接退出。
+2. 如果有 `cron_unidump backup` 正在运行，等待它结束（最长 `PUSH_WAIT_MAX` 秒）。
+3. 用严格主机密钥校验（`PUSH_KNOWN_HOSTS`）连接 NAS，创建 `<PUSH_PATH>/<PUSH_SERVER>`。
+4. 执行 `rsync --remove-source-files`，跳过 `*.part`。rsync 确认某个文件传输成功后才删除本地这个文件。
+5. 任何一步失败，本地文件都保留，下次推送重试。
+
+NAS 上的结果：`<PUSH_PATH>/<PUSH_SERVER>/backup/<任务名>/<备份包>`。
+
+### 首次配置推送
 
 ```bash
-# 全局：~/.cron_unidump.conf
-BACKUP_INTERVAL_DAYS=14         # 每 14 天一次完整备份
-BACKUP_FILE_MODE=incremental    # incremental | differential
+# 1. 生成推送用的密钥（已有可跳过）
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519
+cat ~/.ssh/id_ed25519.pub        # 把这一行加到 NAS 上 PUSH_USER 的 ~/.ssh/authorized_keys
 
-# 单个配置：~/.cron_unidump.d/{name}.conf（覆盖全局）
-INTERVAL_DAYS=7
-FILE_MODE=differential
+# 2. 保存 NAS 主机密钥，并与 NAS 本机的指纹核对
+ssh-keyscan -p 22 nas.example.com > ~/.ssh/known_hosts_nas
+ssh-keygen -lf ~/.ssh/known_hosts_nas
+#   在 NAS 上执行：ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+
+# 3. 在 ~/.cron_unidump.conf 中设置 PUSH_HOST、PUSH_USER、PUSH_PATH、PUSH_SERVER，
+#    以及 PUSH_SSH_KEY=~/.ssh/id_ed25519，然后测试：
+cron_unidump push && tail /var/log/backup/rsyncPush.log
 ```
 
-**备份文件命名**：文件名末尾带类型，便于识别恢复链：
+推送到 NAS 的文件全部保留，本工具不会删除 NAS 上的任何文件，需要自己定期清理。清理时不要删掉后续 `-inc` 仍然依赖的 `-full`。
 
-```
-FILE-myapp-2024-12-01-19-51-01-full.tar.bz2
-FILE-myapp-2024-12-02-19-51-01-inc.tar.bz2
-FILE-myapp-2024-12-03-19-51-01-inc.tar.bz2
-```
+## 恢复
 
-**可靠性**：
+### 文件
 
-- tar 返回码 1（备份过程中有文件被修改）视为成功，归档可用
-- tar 失败时快照自动回滚到运行前的状态，下次运行不会漏掉这些变化
-- 每次运行前的快照保存为 `snapshot-{name}-incremental-YYMMDD.log`
-- tar 以 `nice` / `ionice` 低优先级运行，减少对线上服务的影响
-
-快照文件位置（自动管理，位于 `logDir/{name}/`）：
-- `snapshot-{name}-incremental` - 当前快照（增量链的状态）
-- `snapshot-{name}-incremental-intervalBase` - 最近一次完整备份的基准快照
-
-⚠️ **注意：tar 以 ctime 判断变化**
-
-`chown -R` / `chmod -R` 等只改属性的操作也会更新 ctime，下一次备份会把这些文件全部重新打包。增量模式下只影响一次；差异模式下会持续到下一次完整备份。
-
-⚠️ **恢复说明**：
-
-按时间顺序先解开最近的 `*-full`，再依次解开之后的每个 `*-inc`（差异模式只需最近一个 `*-diff`）。使用 `-g /dev/null` 让 tar 同步删除在备份之间被删除的文件：
+按时间顺序从旧到新解压：先最近的 `-full`，再依次解压它之后的每个 `-inc`（差异模式：`-full` 之后只解压最新的一个 `-diff`）。`-g /dev/null` 让 tar 同时删除两次备份之间被删掉的文件。
 
 ```bash
-cd /restore/path
-tar -xjf FILE-myapp-2024-12-01-19-51-01-full.tar.bz2 -g /dev/null
-tar -xjf FILE-myapp-2024-12-02-19-51-01-inc.tar.bz2  -g /dev/null
-tar -xjf FILE-myapp-2024-12-03-19-51-01-inc.tar.bz2  -g /dev/null
+mkdir /restore && cd /restore
+tar -xjf FILE-site-2026-01-01-19-50-01-full.tar.bz2 -g /dev/null
+tar -xjf FILE-site-2026-01-02-19-50-01-inc.tar.bz2  -g /dev/null
+tar -xjf FILE-site-2026-01-03-19-50-01-inc.tar.bz2  -g /dev/null
+# 结果在 /restore/var/www/site/
 ```
 
-清理旧备份时，不要删除仍在使用中的 `*-full`，否则其后的 `*-inc` 无法恢复。
+备份包内保存的是绝对路径（`/var/www/site/...`）。上面的写法会去掉开头的 `/`，解压到当前目录，比较安全。加 `-P` 或 `-C /` 会直接覆盖线上目录，确认需要时再用。
 
-## 🚫 排除路径详解
+不解压检查备份包：`bzip2 -t FILE.tar.bz2 && tar -tjf FILE.tar.bz2 | head`
 
-### 什么是排除路径？
-
-排除路径用于在文件备份时跳过指定的文件或目录，不将其包含在备份存档中。这有助于：
-- 减少备份文件大小
-- 加快备份速度
-- 避免备份临时文件或缓存
-- 保护敏感文件
-
-### 配置格式
-
-排除路径使用 Bash 数组语法配置：
+### 数据库
 
 ```bash
-EXCLUDE=("path1" "path2" "path3")
+mkdir /restore-db && cd /restore-db
+tar -xzf DB-site_db-2026-01-03-19-50-01.tar.gz
+find . -name backup.sql                                  # mysqldump 导出的 SQL
+mysql -u root -p site_db < ./var/www/html/backup/site/<时间>/backup.sql
+# mydumper 备份：myloader -u root -p -B site_db -d <解压出的目录> -o
 ```
 
-### 支持的路径类型
-
-#### 1. 绝对路径
-
-从文件系统根开始的完整路径：
-
-```bash
-EXCLUDE=("/var/www/cache" "/tmp/uploads" "/var/log/old")
-```
-
-#### 2. 相对路径
-
-相对于 `SOURCE` 目录的路径（自动转换为绝对路径）：
-
-```bash
-SOURCE="/var/www/myapp"
-EXCLUDE=("cache" "tmp" "logs")
-
-# 等同于：
-# EXCLUDE=("/var/www/myapp/cache" "/var/www/myapp/tmp" "/var/www/myapp/logs")
-```
-
-#### 3. 通配符模式
-
-使用 glob 模式进行灵活匹配：
-
-```bash
-EXCLUDE=("*.log" "*.tmp" "*.bak" "node_modules")
-```
-
-#### 4. 混合使用
-
-在同一配置中混合使用多种类型：
-
-```bash
-SOURCE="/var/www/myapp"
-EXCLUDE=(
-  "cache"                           # 相对路径
-  "/var/cache/myapp"               # 绝对路径
-  "*.log"                           # 通配符
-  "/tmp/uploads"                    # 绝对路径
-  "vendor/*/tests"                  # 相对路径 + 通配符
-)
-```
-
-### 实际示例
-
-#### 示例1：Web 应用备份
-
-```bash
-SOURCE="/var/www/laravel-app"
-EXCLUDE=(
-  "storage/logs"
-  "storage/cache"
-  "bootstrap/cache"
-  "node_modules"
-  ".git"
-  "*.log"
-  ".env.local"
-)
-```
-
-#### 示例2：Drupal 站点备份
-
-```bash
-SOURCE="/var/www/drupal"
-EXCLUDE=(
-  "sites/default/files/cache"
-  "sites/default/files/tmp"
-  "sites/default/files/js"
-  "sites/default/files/css"
-  ".git"
-  "*.tar.gz"
-)
-```
-
-#### 示例3：通用服务器备份
-
-```bash
-SOURCE="/var/www"
-EXCLUDE=(
-  "*/cache"
-  "*/logs"
-  "*/tmp"
-  "*/.git"
-  "*/node_modules"
-  "*/vendor"
-  "*.log"
-)
-```
-
-### 排除路径验证
-
-- ✅ 存在的路径 - 正常排除，显示 "Excluding: ..." 消息
-- ⚠️ 不存在的路径 - 显示警告 "Warning: Exclude path not found: ..."，但继续备份
-- ✅ 通配符模式 - 跳过验证，由 tar 处理匹配
-
-### 常见问题
-
-**Q: 路径中有空格怎么办？**
-```bash
-# 在配置文件中使用引号
-EXCLUDE=("path with spaces" "another path")
-```
-
-**Q: 如何排除所有日志文件？**
-```bash
-EXCLUDE=("logs" "*.log" "**/*.log")
-```
-
-**Q: 排除路径支持递归吗？**
-```bash
-EXCLUDE=(
-  "**/cache"        # 排除所有名为 cache 的目录
-  "**/logs"         # 排除所有名为 logs 的目录
-)
-```
-
-**Q: 如何验证排除是否生效？**
-```bash
-# 备份后检查归档内容
-tar -tjf ~/.cron_unidump/files/FILE-myapp-*.tar.bz2 | grep cache
-# 如果没有输出，说明排除成功
-```
-
-## 📊 备份结构
-
-```
-~/.cron_unidump/
-├── files/                    # 文件备份
-│   ├── myapp/
-│   │   ├── FILE-myapp-2024-12-30-19-51-01-full.tar.bz2
-│   │   └── FILE-myapp-2024-12-31-19-51-01-inc.tar.bz2
-│   └── otherapp/
-├── dbs/                      # 数据库备份
-│   ├── myapp/
-│   │   ├── myapp_db-20241230.sql
-│   │   └── myapp_db-20241230.sql.bz2
-│   └── otherapp/
-└── logs/                     # 备份日志
-    ├── myapp/
-    │   ├── myapp-2024-12-30-19-51-01.log
-    │   ├── snapshot-myapp-incremental
-    │   ├── snapshot-myapp-incremental-intervalBase
-    │   └── snapshot-myapp-incremental-241230.log
-    └── otherapp/
-```
-
-## 🆘 故障排除
-
-### 备份失败
-
-检查日志文件：
-```bash
-cat ~/.cron_unidump/logs/myapp/myapp-$(date +%Y%m%d).log
-```
-
-### 排除路径不生效
-
-验证配置格式：
-```bash
-# 查看配置
-cron_unidump show myapp
-
-# 手动测试排除
-bash -x cron_unidump.sh backup file myapp
-```
-
-### 数据库连接失败
-
-验证凭证和权限：
-```bash
-mysql -h $DBHOST -u $DBUSER -p$DBPASS -e "SELECT VERSION();"
-```
-
-### 磁盘空间不足
-
-检查备份目录大小：
-```bash
-du -sh ~/.cron_unidump/*
-```
-
-清理旧备份：
-```bash
-find ~/.cron_unidump/files -name "*.tar.bz2" -mtime +30 -delete
-```
-
-## ⚠️ 已知限制
-
-### 功能限制
-
-- ❌ **文件恢复** - 暂未实现，仅支持数据库恢复
-- 🚧 **数据库恢复** - 选择备份文件功能完整，但实际恢复逻辑开发中
-- 🚧 **邮件通知** - 代码已实现但默认禁用，需手动启用（见高级功能章节）
-- ❌ **文件备份邮件** - 仅数据库备份支持邮件通知
-- ❌ **远程备份存储** - 不支持 S3、FTP、阿里云 OSS 等远程存储
-
-### 即将支持的命令
-
-- `check` - 配置文件检查和验证
-- `help` - 命令帮助信息
-- `remove` - 删除备份配置（当前未实现）
-
-### 开发计划
-
-- [ ] 完善数据库恢复功能（自动化还原 SQL）
-- [ ] 实现文件系统恢复功能
-- [ ] 启用邮件通知功能（取消代码注释）
-- [ ] 添加备份验证机制（MD5/SHA256 校验）
-- [ ] 支持备份加密（AES-256）
-- [ ] 实现配置检查命令（validate 配置）
-- [ ] 添加远程备份支持（S3、FTP、SFTP）
-- [ ] 创建 Web 管理界面
-
-## 📝 配置文件参考
-
-### 环境变量
-
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `fileDir` | 文件备份目录 | `$HOME/.cron_unidump/files` |
-| `dbDir` | 数据库备份目录 | `$HOME/.cron_unidump/dbs` |
-| `logDir` | 日志目录 | `$HOME/.cron_unidump/logs` |
-| `BACKUP_INTERVAL_DAYS` | 文件完整备份间隔（天） | `30` |
-| `BACKUP_FILE_MODE` | 文件备份模式：`incremental` / `differential` | `incremental` |
-
-### 文件备份配置
-
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| `SOURCE` | 备份源目录 | `/var/www` |
-| `EXCLUDE` | 排除路径（数组） | `("cache" "logs")` |
-| `EXTRA_SOURCE` | 额外备份目录 | `/var/html` |
-| `INTERVAL_DAYS` | 完整备份间隔（天），覆盖全局 | `14` |
-| `FILE_MODE` | 备份模式，覆盖全局 | `incremental` |
-
-### 数据库备份配置
-
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| `DBHOST` | 数据库主机 | `localhost` |
-| `DBUSER` | 数据库用户 | `root` |
-| `DBPASS` | 数据库密码 | `password` |
-| `DBNAME` | 数据库名 | `myapp_db` |
-| `DBENGINE` | 备份引擎 | `innodb` |
-| `DBOPTIONS` | 额外选项 | `--lock-tables=false` |
-
-**多数据库备份**：
-
-支持备份多个数据库，使用逗号或空格分隔：
-
-```bash
-# 方式1：逗号分隔（推荐）
-DBNAME='db1,db2,db3'
-
-# 方式2：空格分隔
-DBNAME='db1 db2 db3'
-
-# 实际例子
-DBNAME='wordpress,nextcloud,mediawiki'
-```
-
-⚠️ **注意事项**：
-- `mysqldump` 引擎完全支持多库备份
-- `mydumper` 和 `mysqlhotcopy` 可能不支持多库，建议使用 `mysqldump`
-- 多库备份会生成单个备份文件，包含所有数据库
-
-## 📄 许可证
-
-此项目遵循相关许可证。详见 LICENSE 文件。
-
-## 👤 作者
-
-**Ryanlau** (showq@qq.com)
-
-**版本历史**：
-- **v1.0** (2014/10/23) - 初始版本，基础备份功能
-- **v2.0** (2014/11/10) - 增强配置管理，支持多引擎
-- **v2.1** (2024年更新) - 添加多排除路径支持，完善文档
-- **v2.2** (2026年10月) - 真正的增量备份（链式快照）、可选差异模式、备份类型文件名后缀、失败时快照回滚、低优先级运行
-- **v2.3** (2026年10月) - 内置 NAS 推送（`push` / `run`，`scripts/rsyncPush.sh`）；归档先写 `*.part` 再改名，推送等待备份结束；`backup` 返回码反映失败；`EXCLUDE` 兼容 `--exclude=` 写法
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-如有任何建议或发现 Bug，请提交到项目仓库。
-
-## 📞 支持
-
-- **架构文档** - 详见 `CLAUDE.md` 文件了解项目架构和实现细节
-- **配置示例** - 查看 `conf/` 目录获取更多配置模板
-- **问题反馈** - 提交 GitHub Issue（如果有仓库）或联系作者
-
----
-
-**最后更新**: 2026年10月30日
-**版本**: 2.3（内置 NAS 推送、防止推送不完整备份）
+`cron_unidump restore` 尚未实现，按上面的步骤手动恢复。
+
+## 文件与日志位置
+
+| 路径 | 内容 |
+|---|---|
+| `/var/www/html/backup/<任务>/` | 已完成、等待推送的备份包（`fileDir` / `dbDir`） |
+| `/var/log/backup/<任务>/<任务>-<时间>.log` | 每次备份的日志 |
+| `/var/log/backup/<任务>/snapshot-<任务>-incremental` | 当前增量链的 tar 快照 |
+| `/var/log/backup/<任务>/snapshot-<任务>-incremental-intervalBase` | 最近一次全量的快照 |
+| `/var/log/backup/<任务>/snapshot-<任务>-incremental-YYMMDD.log` | 每次备份前的快照（历史记录与回滚用） |
+| `/var/log/backup/rsyncPush.log` | 推送日志 |
+| `/var/log/backup/cron_unidump.log` | cron 输出（按上面的写法重定向时） |
+
+备份包命名（时间为 UTC）：`FILE-<任务>-<时间>-<full|inc|diff>.tar.bz2`、`DB-<库名>-<时间>.tar.gz`。
+
+磁盘空间：备份目录所在分区至少要能放下两份最大的全量包（一份已完成，一份正在写的 `*.part`）。如果推送连续多天失败，需要更多空间。
+
+## 配置项参考
+
+全局配置写在 `~/.cron_unidump.conf`，任务配置写在 `~/.cron_unidump.d/<name>.conf`，任务配置优先。两个文件都按 bash 语法加载，含空格的值要加引号。
+
+### 全局
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `fileDir` | `/var/www/html/backup` | 文件备份包输出目录（`<fileDir>/<任务>/`） |
+| `dbDir` | `/var/www/html/backup` | 数据库备份包输出目录 |
+| `logDir` | `/var/log/backup` | 快照与日志目录 |
+| `BACKUP_FILEOWN` | — | 备份包的属主，`用户:组` |
+| `BACKUP_INTERVAL_DAYS` | — | 全量文件备份间隔天数（请设置，例如 14） |
+| `BACKUP_FILE_MODE` | `incremental` | `incremental` 或 `differential` |
+| `BACKUP_HOST` / `BACKUP_USER` / `BACKUP_PASS` | — | 默认 MySQL 连接信息 |
+| `BACKUP_MAIL` | — | 保持 `n`，邮件功能未实现 |
+| `PUSH_HOST` | 无（必填） | NAS 主机名或 IP |
+| `PUSH_USER` | 无（必填） | NAS 上的 SSH 用户 |
+| `PUSH_PATH` | 无（必填） | NAS 上的基础目录 |
+| `PUSH_SERVER` | 无（必填） | 本服务器在 NAS 上的子目录 |
+| `PUSH_PORT` | `22` | NAS 的 SSH 端口 |
+| `PUSH_SRC` | `/var/www/html/backup` | 要推送的本地目录（应与 `fileDir`/`dbDir` 一致） |
+| `PUSH_SSH_KEY` | `~/.ssh/id_rsa` | 登录 NAS 的私钥 |
+| `PUSH_KNOWN_HOSTS` | `~/.ssh/known_hosts_nas` | 保存 NAS 主机密钥的 known_hosts |
+| `PUSH_LOG` | `/var/log/backup/rsyncPush.log` | 推送日志 |
+| `PUSH_LOCK` | `/var/lock/rsyncPush.lock` | 锁文件 |
+| `PUSH_WAIT_MAX` | `21600` | 等待正在运行的备份的最长秒数 |
+| `PUSH_BWLIMIT` | 空 | rsync 限速（KiB/s），空表示不限 |
+
+### 任务：文件
+
+| 变量 | 说明 |
+|---|---|
+| `SOURCE` | 要备份的目录（`backup file` 必填） |
+| `EXCLUDE` | 要跳过的路径（bash 数组）：相对 `SOURCE` 的路径、绝对路径、通配符，或现成的 `--exclude=...` 参数 |
+| `EXTRA_SOURCE` | 一起打包的额外目录（bash 数组） |
+| `INTERVAL_DAYS` | 覆盖 `BACKUP_INTERVAL_DAYS` |
+| `FILE_MODE` | 覆盖 `BACKUP_FILE_MODE` |
+
+### 任务：数据库
+
+| 变量 | 说明 |
+|---|---|
+| `DBNAME` | 数据库名；多个用 `db1,db2`（仅 mysqldump） |
+| `DBHOST` / `DBUSER` / `DBPASS` | 覆盖全局的连接信息 |
+| `DBENGINE` | `mysqldump`（任意引擎）、`innodb`（用 `mydumper`）、`myisam`（用 `mysqlhotcopy`）；未设置时为 `myisam` |
+| `DBOPTIONS` | 传给导出工具的额外参数，例如 `--single-transaction` |
+| `DBSQLDUMP_TABLES` | 仅 mysqldump：只导出这些表 |
+
+`DBENGINE` 为 `innodb` / `myisam` 时，导出前会检查所有表是否都是该引擎。引擎混用时请设为 `mysqldump`。
+
+## 故障排查
+
+| 现象 | 检查方法 |
+|---|---|
+| 每个"增量"包都和全量一样大 | 有操作改了所有文件的 ctime（`chown -R`、`chmod -R`、恢复文件等）。统计被打包的文件数：`tr '\0' '\n' < /var/log/backup/<任务>/snapshot-<任务>-incremental \| grep -c '^Y'` |
+| NAS 上的包比源小 / `bzip2 -t` 报错 | 推送时包还没写完（旧版固定时间推送导致）。改用 `cron_unidump run`，再推送一次 |
+| 推送日志：`not configured: PUSH_...` | 在 `~/.cron_unidump.conf` 中设置列出的 `PUSH_*` 变量 |
+| 推送日志：`NAS preflight failed` | 执行 `ssh -i $PUSH_SSH_KEY -p $PUSH_PORT -o UserKnownHostsFile=$PUSH_KNOWN_HOSTS $PUSH_USER@$PUSH_HOST true` 查看具体错误（公钥未授权、主机密钥变化、端口不通） |
+| 推送日志：`backup still running after ...` | 备份超过了 `PUSH_WAIT_MAX`，或有卡住的进程：`pgrep -fa cron_unidump` |
+| `Config file ... is no exists` | 任务名在 `~/.cron_unidump.d/` 中没有对应的配置文件 |
+| 数据库任务报 "table engine have differences" | 表引擎与 `DBENGINE` 不一致，改为 `DBENGINE='mysqldump'` |
+| 备份目录越来越满 | 推送一直失败，查看 `/var/log/backup/rsyncPush.log` |
+
+## 已知限制
+
+- `restore`、`check`、`clear_db` 未实现（恢复请按上文手动操作）。
+- 邮件通知未实现。
+- 数据库每次都是完整导出，没有增量。
+- NAS 端不自动清理，需要手动。
+- 配置文件里的密码是明文，两处配置目录都应只允许属主访问（`install` 已设为 600/700）。
+
+## 给 AI Agent
+
+代码结构、不可破坏的约定和测试方法见 [AGENTS.md](AGENTS.md)。
+
+## 许可证
+
+Apache License 2.0，见 [LICENSE](LICENSE)。原作者：Ryanlau（showq）。
