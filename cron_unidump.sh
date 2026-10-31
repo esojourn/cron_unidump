@@ -214,7 +214,14 @@ function unidump_backup_db(){
   # Mail 发送
   # 是否存在有效备份
   if [ -r $dbBackDir_date ] && [ ! -z "$(ls $dbBackDir_date)" ]; then
-    tar -czPf $BAK_FILEPATH $dbBackDir_date
+    # Write to *.part and rename when done, so push jobs never pick up a half-written archive
+    if tar -czPf $BAK_FILEPATH.part $dbBackDir_date && mv -f $BAK_FILEPATH.part $BAK_FILEPATH; then
+      commentLine 'success' "DB archive: $BAK_FILEPATH"
+    else
+      rm -f $BAK_FILEPATH.part
+      alertMsg "DB archive failed" "$BAK_FILEPATH"
+      unidumpFailed=1
+    fi
     #解压时 tar -zvjPf .tar.bz2
     sudo rm -rf $dbBackDir_date
 
@@ -294,6 +301,12 @@ function unidump_backup_file(){
     excludeArgs=()
     if [[ -n "${EXCLUDE[@]}" ]]; then
       for path in "${EXCLUDE[@]}"; do
+        # 兼容旧配置：已经写成 tar 参数的条目（如 "--exclude=/path"）原样传给 tar
+        if [[ "$path" =~ ^-- ]]; then
+          excludeArgs+=("$path")
+          commentLine 'notice' "Excluding: $path"
+          continue
+        fi
         # 处理相对路径：如果不是以 / 开头，则相对于 SOURCE
         if [[ ! "$path" =~ ^/ && ! "$path" =~ ^\* ]]; then
           path="$SOURCE/$path"
@@ -309,7 +322,8 @@ function unidump_backup_file(){
       done
     fi
 
-    fileBackupCommand="tar -g $snapFile -jpPc -f $TARGET ${excludeArgs[@]} $SOURCE"
+    # Write to *.part and rename when done, so push jobs never pick up a half-written archive
+    fileBackupCommand="tar -g $snapFile -jpPc -f $TARGET.part ${excludeArgs[@]} $SOURCE"
     # 处理额外备份源目录（兼容旧格式字符串和新格式数组）
     if [[ -n "${EXTRA_SOURCE[@]}" ]]; then
       for extra_path in "${EXTRA_SOURCE[@]}"; do
@@ -344,13 +358,14 @@ function unidump_backup_file(){
     rc=$?
 
     # tar rc 1 = some files changed while being read; the archive is still usable
-    if [ $rc -le 1 ]; then
+    if [ $rc -le 1 ] && mv -f $TARGET.part $TARGET; then
       if [ $backupType = full ]; then
         cp $snapFile $intervalSnapFile
       fi
       backInfo="Backup successful! ($backupType, tar rc=$rc)"
       sudo chown $fileOwn $TARGET
     else
+      rm -f $TARGET.part
       # Roll the snapshot back so the next run does not skip these changes
       if [ -f $snapFile-$snapDate.log ]; then
         cp -p $snapFile-$snapDate.log $snapFile
@@ -358,6 +373,7 @@ function unidump_backup_file(){
         rm -f $snapFile
       fi
       backInfo="Backup failed! ($backupType) Error #$rc"
+      unidumpFailed=1
     fi
     commentLine 'notice' "$backInfo"
     echo $backInfo >> $logFile
@@ -469,6 +485,27 @@ function unidump_non_exists_file(){
 PATH="$PATH:/usr/local/bin"
 # shell文件存放的根目录
 initDir=${initDir:-`pwd`}
+# Real location of this script (follows the /usr/bin/cron_unidump symlink)
+selfPath=$(readlink -f "$0")
+selfDir=$(dirname "$selfPath")
+
+# Push finished archives to the NAS with the bundled scripts/rsyncPush.sh
+function unidump_push(){
+  local pushScript=${PUSH_SCRIPT:-$selfDir/scripts/rsyncPush.sh}
+  if [[ ! -f "$pushScript" ]]; then
+    alertMsg "Push script not found" "$pushScript"
+    return 1
+  fi
+  commentLine 'notice' "Push: $pushScript (log: ${PUSH_LOG:-/var/log/backup/rsyncPush.log})"
+  bash "$pushScript"
+  local rc=$?
+  if [[ $rc -eq 0 ]]; then
+    commentLine 'success' "Push completed"
+  else
+    commentLine 'alert' "Push failed rc=$rc, see ${PUSH_LOG:-/var/log/backup/rsyncPush.log}"
+  fi
+  return $rc
+}
 
 
 # 执行目录
@@ -587,6 +624,33 @@ case $1 in
   'backup')
     # db, file, all
     unidump_backup $2 $3
+    exit ${unidumpFailed:-0}
+
+    ;;
+  'push')
+    # Push finished archives to the NAS (PUSH_* settings in ~/.cron_unidump.conf)
+    unidump_push
+    exit $?
+
+    ;;
+  'run')
+    # cron entry point: back up every given job (type:name), then push once.
+    # Example: cron_unidump run file:site1 all:site2
+    # Each job runs in its own process so per-job settings never leak into the next one.
+    [[ $# -lt 2 ]] && { alertMsg "Usage" "cron_unidump run <type:name> [type:name ...]"; exit 1; }
+    runFailed=0
+    for job in "${@:2}"; do
+      jobType=${job%%:*}
+      jobName=${job#*:}
+      if [[ "$jobType" == "$job" || -z "$jobName" ]]; then
+        alertMsg "Bad job spec" "$job (expected type:name, e.g. file:site1)"
+        runFailed=1
+        continue
+      fi
+      bash "$selfPath" backup "$jobType" "$jobName" || runFailed=1
+    done
+    unidump_push || runFailed=1
+    exit $runFailed
 
     ;;
   'restore')
@@ -630,7 +694,7 @@ $(($i+1)) )$file"
 
     ;;
   *)
-    commentLine "alert" "Only support: install, uninstall, add, backup, restore, list, edit, show, check"
+    commentLine "alert" "Only support: install, uninstall, add, backup, push, run, restore, list, edit, show, check"
     ;;
 esac
 

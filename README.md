@@ -276,6 +276,58 @@ cron_unidump backup all myapp
 - 备份日志：`~/.cron_unidump/logs/{name}/`
 - Cron 日志：`/var/log/cron_backup.log`（自定义）
 
+### 推送到 NAS（push / run）
+
+`scripts/rsyncPush.sh` 把备份目录里**已完成**的归档用 rsync 推送到 NAS，确认传输成功后删除本地文件。由 `cron_unidump push` 调用，配置写在全局配置 `~/.cron_unidump.conf` 的 `PUSH_*` 变量里。
+
+**推荐的 cron 写法**：一行完成"备份所有任务 → 推送一次"，推送一定发生在备份结束之后：
+
+```bash
+# 每天 03:50：先备份 site1（文件）和 site2（文件+数据库），再推送
+50 3 * * * /usr/bin/cron_unidump run file:site1 all:site2 >> /var/log/backup/cron_unidump.log 2>&1
+```
+
+`run` 的参数是 `类型:配置名`，类型同 `backup`（`file` / `db` / `all`）。每个任务在独立进程中执行，任一任务失败时返回码非 0，但仍会推送已完成的归档。
+
+**防止推送不完整的备份**：
+
+- 归档先写成 `*.part`，tar 成功后才改名；推送排除 `*.part`
+- 推送开始前若有 `cron_unidump backup` 仍在运行，会等待（最多 `PUSH_WAIT_MAX` 秒）
+- `flock` 保证同时只有一个推送
+- 对 NAS 做严格的主机密钥校验（`PUSH_KNOWN_HOSTS`）
+- rsync 失败时保留本地文件，下次继续推送
+
+**配置**（`~/.cron_unidump.conf`）：
+
+```bash
+PUSH_SERVER='001-SK2024'                      # 必填：NAS 上的子目录
+#PUSH_SRC='/var/www/html/backup'              # 要推送的本地目录（与 fileDir/dbDir 一致）
+#PUSH_HOST='dingxuan.synology.me'
+#PUSH_USER='unicom'
+#PUSH_PORT='11756'
+#PUSH_PATH='/var/services/homes/unicom/rsync'
+#PUSH_SSH_KEY="$HOME/.ssh/id_rsa"
+#PUSH_KNOWN_HOSTS="$HOME/.ssh/known_hosts_nas"
+#PUSH_LOG='/var/log/backup/rsyncPush.log'
+#PUSH_WAIT_MAX=21600                          # 等待备份结束的最长秒数
+#PUSH_BWLIMIT=''                              # 限速 KiB/s，空 = 不限
+```
+
+NAS 上的目录结构保持不变：`<PUSH_PATH>/<PUSH_SERVER>/backup/<配置名>/<归档>`。
+
+**首次部署**：
+
+```bash
+# 1. 生成密钥（已有可跳过），把公钥加入 NAS 账号的 ~/.ssh/authorized_keys
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''
+cat ~/.ssh/id_ed25519.pub
+# 2. 保存 NAS 主机密钥，并核对指纹
+ssh-keyscan -p 11756 dingxuan.synology.me > ~/.ssh/known_hosts_nas
+ssh-keygen -lf ~/.ssh/known_hosts_nas
+# 3. 在 ~/.cron_unidump.conf 设置 PUSH_SERVER（以及 PUSH_SSH_KEY），手动试推一次
+cron_unidump push && tail /var/log/backup/rsyncPush.log
+```
+
 ### 邮件通知（需手动启用）
 
 ⚠️ **当前状态**：功能已实现但默认禁用（代码被注释）
@@ -707,6 +759,7 @@ DBNAME='wordpress,nextcloud,mediawiki'
 - **v2.0** (2014/11/10) - 增强配置管理，支持多引擎
 - **v2.1** (2024年更新) - 添加多排除路径支持，完善文档
 - **v2.2** (2026年10月) - 真正的增量备份（链式快照）、可选差异模式、备份类型文件名后缀、失败时快照回滚、低优先级运行
+- **v2.3** (2026年10月) - 内置 NAS 推送（`push` / `run`，`scripts/rsyncPush.sh`）；归档先写 `*.part` 再改名，推送等待备份结束；`backup` 返回码反映失败；`EXCLUDE` 兼容 `--exclude=` 写法
 
 ## 🤝 贡献
 
@@ -723,4 +776,4 @@ DBNAME='wordpress,nextcloud,mediawiki'
 ---
 
 **最后更新**: 2026年10月30日
-**版本**: 2.2（增量 / 差异备份模式、失败回滚）
+**版本**: 2.3（内置 NAS 推送、防止推送不完整备份）
